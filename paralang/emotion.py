@@ -55,12 +55,41 @@ _TAG_RE = re.compile(r"\[([a-zA-Z_]+)(?::([0-9.]+))?\]")
 _SENT_RE = re.compile(r"[^.!?…]+(?:\.\.\.|[.!?…])*", re.UNICODE)
 
 
+_EMPH_RE = re.compile(r"\*([^*\n]+)\*")
+
+
+def clean(text: str) -> str:
+    """Strip pacing marks: `|` (a beat) and `*word*` (emphasis)."""
+    text = _EMPH_RE.sub(r"\1", text)
+    return re.sub(r"\s+", " ", text.replace("|", " ")).strip()
+
+
 @dataclass
 class Line:
-    text: str
+    text: str            # clean text, what every engine can read
     emotion: str
     intensity: float
     prosody: Prosody
+    # Same sentence WITH pacing marks: `|` = a beat inside the sentence, `*word*`
+    # = emphasis. Sentence gaps alone cannot make one word land; these can.
+    marked: str = ""
+
+    def beats(self) -> list[tuple[str, bool]]:
+        """[(chunk, emphasised)] in order, split at beats. Emphasis also opens a beat."""
+        out: list[tuple[str, bool]] = []
+        for piece in (self.marked or self.text).split("|"):
+            for i, part in enumerate(_EMPH_RE.split(piece)):
+                part = part.strip()
+                if not part:
+                    continue
+                # Bare punctuation belongs to the chunk before it, never its own
+                # beat: "*theoretical*." must not become "theoretical... ."
+                if out and not any(c.isalnum() for c in part):
+                    prev, emph = out[-1]
+                    out[-1] = (prev + part, emph)
+                    continue
+                out.append((part, i % 2 == 1))
+        return out
 
 
 @dataclass
@@ -102,8 +131,11 @@ def express(text: str, emotion: str = "neutral", intensity: float = 1.0, *,
     planner = DeliveryPlanner(base_rate_pct=base_rate_pct, wobble=wobble)
     script = Script()
     for emo, inten, sentence in parse(text, emotion, intensity):
-        p = planner.plan(sentence, cues, reply_id="script", emotion=emo, intensity=inten)
-        script.lines.append(Line(sentence, emo, inten, p))
+        plain = clean(sentence)
+        if not plain:
+            continue
+        p = planner.plan(plain, cues, reply_id="script", emotion=emo, intensity=inten)
+        script.lines.append(Line(plain, emo, inten, p, marked=sentence))
     if not script.lines:
         raise ValueError("nothing speakable in text (empty, or only [emotion] tags)")
     return script
