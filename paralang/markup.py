@@ -34,7 +34,7 @@ PROMPT = """You mark up a voiceover script for a narrator. Return the SAME text 
 
 Marks:
 - [emotion] before a sentence where the delivery should change. Allowed: {emotions}. Use few; most sentences inherit the previous one.
-- | (a beat) inside a sentence, right before the payoff of a line, where a human narrator would hold for a moment. At most one per sentence, and only on lines that deserve weight.
+- | (a beat) inside a sentence, right before the payoff of a line, where a human narrator would hold for a moment. At most one per sentence, and only on lines that deserve weight. Never inside a phrase that belongs together ("collision course", "three football fields", a name, a number): only between phrases.
 - *word* around the one word that carries a line's punch. Rare: at most one per 3 sentences.
 
 Choose emotions that fit the story, not the punctuation: danger, stakes and reveals are serious or dramatic, never excited or cheerful. Keep the text on one line, exactly as given apart from the marks. Start the text with an [emotion]. Output only the marked text, no explanation.
