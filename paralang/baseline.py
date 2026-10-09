@@ -21,7 +21,7 @@ from .features import TurnFeatures
 TRACKED = {
     "words_per_sec":     0.4,
     "pause_ratio":       0.05,
-    "loudness":          0.08,
+    "loudness":          1.5,    # dB (numpy RMS, same units in fast and full mode)
     "f0_median_st":      1.0,
     "f0_range_st":       1.0,
     "response_latency_s": 0.3,

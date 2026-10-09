@@ -121,46 +121,106 @@ def _smile():
     return _SMILE
 
 
-def _acoustics(x: np.ndarray, sr: int) -> dict:
+def prewarm() -> None:
+    """Load openSMILE now (~12 s cold on Windows) instead of on the first turn."""
+    _smile()
+
+
+# ── fast path: numpy pitch tracker (default) ────────────────────────────────
+# Measured 2026-10-09: openSMILE costs ~12 s cold + ~145 ms per 3 s turn, and the
+# cues only use pitch + loudness. This normalised-autocorrelation tracker does
+# pitch in a few ms with no startup. "full" mode keeps openSMILE for jitter /
+# shimmer / HNR (stored, not used by any cue).
+F0_MIN_HZ, F0_MAX_HZ = 60.0, 400.0
+VOICING_THRESHOLD = 0.45     # normalised autocorrelation peak needed to call a frame voiced
+_WIN_S, _HOP_S = 0.04, 0.01
+
+
+def pitch_track(x: np.ndarray, sr: int) -> np.ndarray:
+    """F0 in Hz per 10 ms frame, 0 where unvoiced. Vectorised: one FFT batch."""
+    win, hop = int(_WIN_S * sr), int(_HOP_S * sr)
+    if len(x) < win:
+        return np.zeros(0)
+    n = 1 + (len(x) - win) // hop
+    frames = np.lib.stride_tricks.as_strided(
+        x, shape=(n, win), strides=(x.strides[0] * hop, x.strides[0])).astype(np.float32)
+    frames = frames - frames.mean(axis=1, keepdims=True)
+    energy = (frames ** 2).sum(axis=1)
+    nfft = 1 << (2 * win - 1).bit_length()
+    spec = np.fft.rfft(frames * np.hanning(win).astype(np.float32), nfft)
+    ac = np.fft.irfft(np.abs(spec) ** 2, nfft)[:, :win]
+    ac /= np.maximum(ac[:, :1], 1e-12)
+    lo, hi = int(sr / F0_MAX_HZ), min(win - 2, int(sr / F0_MIN_HZ))
+    seg = ac[:, lo:hi]
+    best = seg.max(axis=1)
+    # first lag reaching 90% of the best peak: avoids sub-harmonic (octave-down) picks
+    lag = lo + np.argmax(seg >= 0.9 * best[:, None], axis=1)
+    # walk to the local maximum, then parabolic interpolation for sub-sample precision
+    for _ in range(4):
+        step = ac[np.arange(n), lag + 1] > ac[np.arange(n), lag]
+        lag = np.where(step & (lag < hi), lag + 1, lag)
+    a, b, c = (ac[np.arange(n), lag - 1], ac[np.arange(n), lag], ac[np.arange(n), lag + 1])
+    denom = a - 2 * b + c
+    frac = np.where(np.abs(denom) > 1e-9, 0.5 * (a - c) / denom, 0.0)
+    f0 = sr / (lag + np.clip(frac, -0.5, 0.5))
+    loud = energy > (np.percentile(energy, 95) * 10 ** (-SILENCE_DB_BELOW_PEAK / 10))
+    return np.where((best >= VOICING_THRESHOLD) & loud, f0, 0.0)
+
+
+def _pitch_stats(f0_st: np.ndarray, hop: float) -> dict:
+    voiced = f0_st > 0
+    if voiced.sum() < 5:
+        return {}
+    t = np.arange(len(f0_st)) * hop
+    vf0, vt = f0_st[voiced], t[voiced]
+    tail = vt >= vt[-1] - FINAL_WINDOW_S
+    slope = float(np.polyfit(vt[tail], vf0[tail], 1)[0]) if tail.sum() >= 5 else None
+    return {"f0_median_st": float(np.median(vf0)),
+            "f0_range_st": float(np.percentile(vf0, 90) - np.percentile(vf0, 10)),
+            "f0_final_slope_st": slope}
+
+
+def _loudness_db(x: np.ndarray, sr: int, mask: np.ndarray) -> float | None:
+    n = max(1, int(sr * FRAME_S))
+    frames = x[: len(x) // n * n].reshape(-1, n)
+    if not mask.any():
+        return None
+    rms = np.sqrt((frames[mask[: len(frames)]] ** 2).mean(axis=1))
+    return float(20 * np.log10(rms.mean() + 1e-9))
+
+
+def _acoustics(x: np.ndarray, sr: int, mode: str) -> dict:
     """Pitch/voice-quality stats. Any failure degrades to {} (timing features
     still ship) because one bad turn must never break a live call."""
     try:
-        return _acoustics_unchecked(x, sr)
+        if mode == "full":
+            return _acoustics_opensmile(x, sr)
+        hz = pitch_track(x, sr)
+        st = np.where(hz > 0, 12 * np.log2(np.maximum(hz, 1e-9) / 27.5), 0.0)
+        return _pitch_stats(st, _HOP_S)
     except Exception as e:  # noqa: BLE001 - boundary with a native lib
         log.warning("paralang: acoustic features skipped (%s: %s)", type(e).__name__, e)
         return {}
 
 
-def _acoustics_unchecked(x: np.ndarray, sr: int) -> dict:
+def _acoustics_opensmile(x: np.ndarray, sr: int) -> dict:
     lld = _smile().process_signal(x, sr)
-    f0 = lld["F0semitoneFrom27.5Hz_sma3nz"].to_numpy()
-    voiced = f0 > 0                                  # eGeMAPS writes 0 where unvoiced
-    if voiced.sum() < 5:
-        return {}
-    hop = 0.01
-    t = np.arange(len(f0)) * hop
-    vf0, vt = f0[voiced], t[voiced]
-    tail = vt >= vt[-1] - FINAL_WINDOW_S
-    slope = float(np.polyfit(vt[tail], vf0[tail], 1)[0]) if tail.sum() >= 5 else None
-
-    def vmean(col):
-        return float(lld[col].to_numpy()[voiced].mean())
-
-    return {
-        "loudness": float(lld["Loudness_sma3"].to_numpy()[voiced].mean()),
-        "f0_median_st": float(np.median(vf0)),
-        "f0_range_st": float(np.percentile(vf0, 90) - np.percentile(vf0, 10)),
-        "f0_final_slope_st": slope,
-        "jitter": vmean("jitterLocal_sma3nz"),
-        "shimmer_db": vmean("shimmerLocaldB_sma3nz"),
-        "hnr_db": vmean("HNRdBACF_sma3nz"),
-    }
+    f0 = lld["F0semitoneFrom27.5Hz_sma3nz"].to_numpy()   # 0 where unvoiced
+    out = _pitch_stats(f0, 0.01)
+    voiced = f0 > 0
+    if out:
+        for key, col in (("jitter", "jitterLocal_sma3nz"), ("shimmer_db", "shimmerLocaldB_sma3nz"),
+                         ("hnr_db", "HNRdBACF_sma3nz")):
+            out[key] = float(lld[col].to_numpy()[voiced].mean())
+    return out
 
 
 def extract(audio, sample_rate: int, text: str = "", *, num_channels: int = 1,
             response_latency_s: float | None = None, barge_in: bool = False,
-            acoustic: bool = True) -> TurnFeatures:
-    """Measure one caller turn. `audio` is the caller's speech for this turn only."""
+            acoustic: bool | str = "fast") -> TurnFeatures:
+    """Measure one caller turn. `audio` is the caller's speech for this turn only.
+    acoustic: "fast" (numpy, default, ~ms), "full" (openSMILE, + jitter/shimmer/HNR), False."""
+    mode = "fast" if acoustic is True else acoustic
     x = to_float_mono(audio, sample_rate, num_channels)
     mask = _voiced_mask(x, sample_rate)
     pauses, span = _pauses(mask)
@@ -180,7 +240,9 @@ def extract(audio, sample_rate: int, text: str = "", *, num_channels: int = 1,
         response_latency_s=response_latency_s,
         barge_in=barge_in,
     )
-    if acoustic and voiced_s >= MIN_ACOUSTIC_S:
-        for k, v in _acoustics(x, sample_rate).items():
+    if mode and voiced_s >= MIN_ACOUSTIC_S:
+        # loudness is always the numpy dB value so its units never depend on the mode
+        feats.loudness = _loudness_db(x, sample_rate, mask)
+        for k, v in _acoustics(x, sample_rate, mode).items():
             setattr(feats, k, v)
     return feats

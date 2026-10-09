@@ -72,9 +72,15 @@ class TurnResult:
 
 
 class Analyzer:
-    def __init__(self, warmup_turns: int = 3, acoustic: bool = True):
+    def __init__(self, warmup_turns: int = 3, acoustic: bool | str = "fast"):
+        """acoustic: "fast" (numpy pitch, ~ms, default) | "full" (openSMILE) | False."""
         self.baseline = Baseline(warmup=warmup_turns)
-        self.acoustic = acoustic
+        self.acoustic = "fast" if acoustic is True else acoustic
+        if self.acoustic == "full":
+            # openSMILE takes ~12 s to load cold; do it now, off-thread, not on turn 1
+            import threading
+            from .features import prewarm
+            threading.Thread(target=prewarm, daemon=True, name="paralang-prewarm").start()
         self.turns: list[TurnResult] = []
 
     def features(self, audio, sample_rate: int, text: str = "", **kw) -> TurnFeatures:
