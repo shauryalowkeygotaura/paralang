@@ -161,11 +161,20 @@ def pitch_track(x: np.ndarray, sr: int) -> np.ndarray:
         x, shape=(n, win), strides=(x.strides[0] * hop, x.strides[0])).astype(np.float32)
     frames = frames - frames.mean(axis=1, keepdims=True)
     energy = (frames ** 2).sum(axis=1)
-    nfft = 1 << (2 * win - 1).bit_length()
-    spec = np.fft.rfft(frames * np.hanning(win).astype(np.float32), nfft)
-    ac = np.fft.irfft(np.abs(spec) ** 2, nfft)[:, :win]
-    ac /= np.maximum(ac[:, :1], 1e-12)
     lo, hi = int(sr / F0_MAX_HZ), min(win - 2, int(sr / F0_MIN_HZ))
+    kmax = hi + 2                       # lags read below: up to hi + 1
+    # Circular autocorrelation equals the linear one for every lag <= nfft - win,
+    # so nfft only has to cover win + kmax, not 2*win: 512 instead of 1024 at 8 kHz.
+    nfft = 1 << (win + kmax - 1).bit_length()
+    window = np.hanning(win).astype(np.float32)
+    spec = np.fft.rfft(frames * window, nfft)
+    ac = np.fft.irfft(np.abs(spec) ** 2, nfft)[:, :kmax]
+    ac /= np.maximum(ac[:, :1], 1e-12)
+    # Boersma (1993) correction, as in Praat: divide by the window's own
+    # autocorrelation. The taper shrinks long lags, so without it voices below
+    # ~75 Hz (deep male) never cleared the voicing threshold.
+    w_ac = np.fft.irfft(np.abs(np.fft.rfft(window, nfft)) ** 2, nfft)[:kmax]
+    ac /= np.maximum(w_ac / w_ac[0], 1e-3)
     seg = ac[:, lo:hi]
     best = seg.max(axis=1)
     # first lag reaching 90% of the best peak: avoids sub-harmonic (octave-down) picks

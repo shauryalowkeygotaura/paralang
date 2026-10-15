@@ -135,3 +135,19 @@ def test_extraction_is_fast_enough():
 def test_bad_format_rejected():
     with pytest.raises(ValueError):
         extract(b"\x00\x00" * 100, 0)
+
+
+@pytest.mark.parametrize("hz", [60, 70, 85, 395])
+def test_deep_and_high_voices_tracked(hz):
+    # before the Boersma window correction, <75 Hz (deep male) never voiced
+    from paralang.features import pitch_track
+    f = pitch_track(tone(hz, 2.0), SR)
+    v = f[f > 0]
+    assert len(v) > 0.9 * len(f)
+    assert abs(np.median(v) - hz) / hz < 0.02
+
+
+def test_noise_is_not_voiced():
+    from paralang.features import pitch_track
+    noise = np.random.default_rng(1).normal(0, 0.05, SR * 2).astype(np.float32)
+    assert (pitch_track(noise, SR) > 0).sum() == 0

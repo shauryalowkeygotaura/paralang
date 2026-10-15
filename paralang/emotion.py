@@ -52,7 +52,9 @@ EMOTIONS: dict[str, Emotion] = {
 }
 
 _TAG_RE = re.compile(r"\[([a-zA-Z_]+)(?::([0-9.]+))?\]")
-_SENT_RE = re.compile(r"[^.!?…]+(?:\.\.\.|[.!?…])*", re.UNICODE)
+# "।" / "॥" (danda) end Hindi sentences; without them a Hindi sentence and the
+# English one after it became one line and the Hindi voice read both.
+_SENT_RE = re.compile(r"[^.!?…।॥]+(?:\.\.\.|[.!?…।॥])*", re.UNICODE)
 
 
 _EMPH_RE = re.compile(r"\*([^*\n]+)\*")

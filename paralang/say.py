@@ -9,16 +9,17 @@ edge-tts voices. For reels, voiceovers, demos: anything, not just agents.
     python -m paralang.say "[dramatic] And none of them | are *theoretical*." --engine orpheus -v troy
     python -m paralang.say "..." --engine aura -v aura-2-andromeda-en       # needs DEEPGRAM_API_KEY
 
-Engines (default: orpheus; override with --engine or PARALANG_ENGINE):
+Engines (default: aura; override with --engine or PARALANG_ENGINE):
+  aura     Deepgram Aura-2, voice aura-2-andromeda-en, DEEPGRAM_API_KEY. No emotion
+           control: paced by sentence gaps and "..." beats. Devanagari lines go to
+           edge Swara (hi-IN); a sentence Aura fails on goes to edge Neerja.
   orpheus  Groq canopylabs/orpheus-v1-english, GROQ_API_KEY(S). ACTS the emotion;
-           voices autumn diana hannah austin daniel troy. English only: any line in
-           Devanagari/other script, or a chunk every key is rate-limited on, is
-           spoken by edge Neerja instead, so nothing is ever dropped.
+           voices autumn diana hannah austin daniel troy. Same fallbacks.
   edge     free, knob-based emotion (rate/pitch/volume), any language.
-  aura     Deepgram Aura-2, DEEPGRAM_API_KEY; no emotion control, pacing by gaps only.
 
     from paralang.say import say_wav
-    say_wav("[calm] Saans lo.", "out.wav", voice="en-IN-NeerjaNeural")
+    say_wav("Take a breath.", "out.wav")                              # aura andromeda
+    say_wav("[calm] Saans lo.", "out.wav", engine="edge", voice="en-IN-NeerjaNeural")
 """
 from __future__ import annotations
 
@@ -170,23 +171,36 @@ def orpheus_pcm(script, voice: str = "troy", *, fallback_voice: str = DEFAULT_VO
     return bytes(pcm)
 
 
-def aura_pcm(script, voice: str = "aura-2-andromeda-en") -> bytes:
-    """Deepgram Aura-2: one request per sentence, planner gaps between, never retimed."""
-    key, pcm = _key("DEEPGRAM_API_KEY"), bytearray()
-    for sentence, pause in to_aura(script):
+def aura_pcm(script, voice: str = "aura-2-andromeda-en", *, fallback_voice: str = DEFAULT_VOICE,
+             live: bool = False) -> bytes:
+    """Deepgram Aura-2 (Andromeda): one request per sentence, planner gaps
+    between, never retimed. A sentence Aura cannot say goes to edge so nothing
+    is dropped: Devanagari -> Swara (hi-IN), any Aura failure -> Neerja, both
+    with the planner's rate/pitch/volume knobs."""
+    from . import aura
+    pcm = bytearray()
+    for line, (sentence, pause) in zip(script.lines, to_aura(script)):
         pcm += b"\x00\x00" * (SR * pause // 1000)
-        pcm += _decode(_http(f"https://api.deepgram.com/v1/speak?model={voice}&encoding=mp3",
-                             {"text": sentence}, f"Token {key}"))
+        if aura.speakable(sentence):
+            try:
+                pcm += aura.synth(sentence, voice, live=live)
+                continue
+            except aura.AuraError as e:
+                print(f"  ! aura failed ({str(e)[:80]}); this sentence -> edge", file=sys.stderr)
+        pcm += asyncio.run(_synth(sentence, edge_voice_for(sentence, fallback_voice),
+                                  line.prosody.edge()))
     return bytes(pcm)
 
 
 ENGINE_VOICES = {"edge": DEFAULT_VOICE, "orpheus": "troy", "aura": "aura-2-andromeda-en"}
-DEFAULT_ENGINE = (os.environ.get("PARALANG_ENGINE") or "orpheus").strip().lower()
+# Default = Deepgram Aura-2 Andromeda (Shaurya, 2026-10-15). Fallbacks: edge Neerja,
+# and hi-IN Swara for Devanagari. PARALANG_ENGINE=orpheus|edge overrides.
+DEFAULT_ENGINE = (os.environ.get("PARALANG_ENGINE") or "aura").strip().lower()
 if DEFAULT_ENGINE not in ENGINE_VOICES:
     # warn, never kill: agents import this module and must keep running
     print(f"paralang: PARALANG_ENGINE={DEFAULT_ENGINE!r} unknown (choose {', '.join(ENGINE_VOICES)}); "
-          "using orpheus", file=sys.stderr)
-    DEFAULT_ENGINE = "orpheus"
+          "using aura", file=sys.stderr)
+    DEFAULT_ENGINE = "aura"
 
 
 def say_wav(text: str, out: str | Path, emotion: str = "neutral", intensity: float = 1.0,

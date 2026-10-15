@@ -123,8 +123,8 @@ def test_rate_limited_chunk_falls_back_not_dropped(monkeypatch):
     assert pcm.endswith(b"ED") and spoken == ["Big news today!"]   # direction tag stripped for edge
 
 
-def test_default_engine_is_orpheus():
-    assert say.DEFAULT_ENGINE == "orpheus"
+def test_default_engine_is_aura_andromeda():
+    assert say.DEFAULT_ENGINE == "aura" and say.ENGINE_VOICES["aura"] == "aura-2-andromeda-en"
 
 
 def test_long_audio_aligned_in_windows_cut_at_silence(monkeypatch):
