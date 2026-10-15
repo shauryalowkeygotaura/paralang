@@ -8,7 +8,7 @@ dependencies = ["numpy>=1.26"]
 [project.optional-dependencies]
 acoustic = ["opensmile>=2.5"]          # pitch / loudness / jitter / shimmer / HNR
 pipecat = ["pipecat-ai>=1.12", "loguru"]
-say = ["edge-tts>=7"]                 # free emotional TTS CLI (python -m paralang.say), needs ffmpeg
+say = ["edge-tts>=7.3.1"]                 # free emotional TTS CLI (python -m paralang.say), needs ffmpeg
 dev = ["pytest>=8", "opensmile>=2.5"]
 
 [project.scripts]
