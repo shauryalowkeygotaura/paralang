@@ -9,9 +9,13 @@ edge-tts voices. For reels, voiceovers, demos: anything, not just agents.
     python -m paralang.say "[dramatic] And none of them | are *theoretical*." --engine orpheus -v troy
     python -m paralang.say "..." --engine aura -v aura-2-andromeda-en       # needs DEEPGRAM_API_KEY
 
-Engines: edge (free, knob-based emotion), orpheus (Groq canopylabs/orpheus-v1-english,
-GROQ_API_KEY, ACTS the emotion; voices autumn diana hannah austin daniel troy),
-aura (Deepgram Aura-2, DEEPGRAM_API_KEY; no emotion control, pacing by gaps only).
+Engines (default: orpheus; override with --engine or PARALANG_ENGINE):
+  orpheus  Groq canopylabs/orpheus-v1-english, GROQ_API_KEY(S). ACTS the emotion;
+           voices autumn diana hannah austin daniel troy. English only: any line in
+           Devanagari/other script, or a chunk every key is rate-limited on, is
+           spoken by edge Neerja instead, so nothing is ever dropped.
+  edge     free, knob-based emotion (rate/pitch/volume), any language.
+  aura     Deepgram Aura-2, DEEPGRAM_API_KEY; no emotion control, pacing by gaps only.
 
     from paralang.say import say_wav
     say_wav("[calm] Saans lo.", "out.wav", voice="en-IN-NeerjaNeural")
@@ -22,6 +26,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -65,7 +70,7 @@ async def say_pcm(text: str, emotion: str = "neutral", intensity: float = 1.0,
     pcm = bytearray()
     for sentence, kw, pause in to_edge(express(text, emotion, intensity)):
         pcm += b"\x00\x00" * (SR * pause // 1000)
-        pcm += await _synth(sentence, voice, kw)
+        pcm += await _synth(sentence, edge_voice_for(sentence, voice), kw)
     return bytes(pcm)
 
 
@@ -106,14 +111,62 @@ def _key(name: str) -> str:
     return k
 
 
-def orpheus_pcm(script, voice: str = "troy") -> bytes:
-    """Groq Orpheus: one request per ~600-char chunk; it acts the [directions]."""
-    key, pcm = _key("GROQ_API_KEY"), bytearray()
-    for chunk in to_orpheus(script):
-        pcm += _decode(_http("https://api.groq.com/openai/v1/audio/speech",
-                             {"model": "canopylabs/orpheus-v1-english", "voice": voice,
-                              "input": chunk, "response_format": "wav"}, f"Bearer {key}"))
-        pcm += b"\x00\x00" * (SR * 300 // 1000)   # paragraph breath between chunks
+# edge's en-IN voices return NO audio for Devanagari (measured 2026-10-15), so a
+# Hindi-script line must go to a hi-IN voice. Same gender as Neerja by default.
+SCRIPT_VOICES = [(re.compile(r"[ऀ-ॿ]"), "hi-IN-SwaraNeural")]
+
+
+def edge_voice_for(text: str, default: str = DEFAULT_VOICE) -> str:
+    """The edge voice that can actually speak `text`'s script."""
+    for pattern, voice in SCRIPT_VOICES:
+        if pattern.search(text):
+            return voice
+    return default
+
+
+def _edge_lines(lines, voice: str = DEFAULT_VOICE) -> bytes:
+    """Fallback voice for lines Orpheus cannot say (non-Latin script, rate limit)."""
+    from .emotion import Script
+    pcm = bytearray()
+    for sentence, kw, pause in to_edge(Script(list(lines))):
+        pcm += b"\x00\x00" * (SR * pause // 1000)
+        pcm += asyncio.run(_synth(sentence, edge_voice_for(sentence, voice), kw))
+    return bytes(pcm)
+
+
+def orpheus_pcm(script, voice: str = "troy", *, fallback_voice: str = DEFAULT_VOICE,
+                live: bool = False) -> bytes:
+    """Groq Orpheus: consecutive English lines packed into ~600-char requests
+    (it acts the [directions]); Devanagari / non-Latin lines, or a chunk every
+    key is rate-limited on, go to edge so no line is ever lost. Order is kept."""
+    from .emotion import Script
+    from . import orpheus
+
+    groups: list[tuple[bool, list]] = []          # runs of (orpheus-speakable?, lines)
+    for line in script.lines:
+        ok = orpheus.speakable(line.text)
+        if groups and groups[-1][0] == ok:
+            groups[-1][1].append(line)
+        else:
+            groups.append((ok, [line]))
+
+    pcm = bytearray()
+    for ok, lines in groups:
+        if pcm:
+            pcm += b"\x00\x00" * (SR * lines[0].prosody.pause_before_ms // 1000)
+        if not ok:
+            pcm += _edge_lines(lines, fallback_voice)
+            continue
+        sub = Script(lines)
+        for i, chunk in enumerate(to_orpheus(sub)):
+            if i:
+                pcm += b"\x00\x00" * (SR * 300 // 1000)   # paragraph breath between chunks
+            try:
+                pcm += orpheus.synth(chunk, voice, live=live)
+            except orpheus.RateLimited:
+                print("  ! orpheus: every Groq key rate-limited; this chunk -> edge", file=sys.stderr)
+                pcm += asyncio.run(_synth(re.sub(r"\[[a-z_:.0-9]+\]\s*", "", chunk),
+                                          fallback_voice, {}))
     return bytes(pcm)
 
 
@@ -128,10 +181,17 @@ def aura_pcm(script, voice: str = "aura-2-andromeda-en") -> bytes:
 
 
 ENGINE_VOICES = {"edge": DEFAULT_VOICE, "orpheus": "troy", "aura": "aura-2-andromeda-en"}
+DEFAULT_ENGINE = (os.environ.get("PARALANG_ENGINE") or "orpheus").strip().lower()
+if DEFAULT_ENGINE not in ENGINE_VOICES:
+    # warn, never kill: agents import this module and must keep running
+    print(f"paralang: PARALANG_ENGINE={DEFAULT_ENGINE!r} unknown (choose {', '.join(ENGINE_VOICES)}); "
+          "using orpheus", file=sys.stderr)
+    DEFAULT_ENGINE = "orpheus"
 
 
 def say_wav(text: str, out: str | Path, emotion: str = "neutral", intensity: float = 1.0,
-            voice: str | None = None, engine: str = "edge") -> Path:
+            voice: str | None = None, engine: str | None = None) -> Path:
+    engine = engine or DEFAULT_ENGINE
     voice = voice or ENGINE_VOICES[engine]
     if engine == "edge":
         pcm = asyncio.run(say_pcm(text, emotion, intensity, voice))
@@ -154,10 +214,11 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("-e", "--emotion", default="neutral", choices=sorted(EMOTIONS))
     ap.add_argument("-i", "--intensity", type=float, default=1.0, help="0..2 (default 1)")
     ap.add_argument("-v", "--voice", default=None, help="voice name for the chosen engine")
-    ap.add_argument("--engine", choices=sorted(ENGINE_VOICES), default="edge")
+    ap.add_argument("--engine", choices=sorted(ENGINE_VOICES), default=DEFAULT_ENGINE,
+                    help=f"default {DEFAULT_ENGINE} (env PARALANG_ENGINE)")
     ap.add_argument("-o", "--out", type=Path, default=Path("say.wav"))
     ap.add_argument("--format", choices=["wav", "ssml", "azure", "elevenlabs", "openai", "gemini"],
-                    default="wav", help="wav = synthesize with edge-tts; others print the payload")
+                    default="wav", help="wav = synthesize with --engine; others print the payload")
     ap.add_argument("--demo", action="store_true", help="render every emotion to ./emotion_demo/")
     a = ap.parse_args(argv)
 

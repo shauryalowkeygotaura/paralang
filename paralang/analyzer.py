@@ -89,16 +89,76 @@ class _Shared:
     pool = None
     busy_until = 0.0
     lock = __import__("threading").Lock()
+    worker = None          # subprocess running paralang._smile_worker
+    worker_starts = 0
+    MAX_WORKER_STARTS = 3  # after this many deaths, stay in-thread (still correct, just GIL-bound)
 
     @classmethod
     def get_pool(cls):
+        """One thread that serialises background jobs and does the idle gating.
+        The heavy openSMILE work itself runs in the worker process."""
         with cls.lock:
             if cls.pool is None:
                 from concurrent.futures import ThreadPoolExecutor
-                from .features import prewarm
                 cls.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="paralang-smile")
-                cls.pool.submit(prewarm)          # ~12 s cold load happens here, once
+                cls.pool.submit(cls._ensure_worker)   # start + prewarm the worker now, not on turn 1
             return cls.pool
+
+    @classmethod
+    def _ensure_worker(cls):
+        """The worker process, started if needed. None = use the in-thread path.
+        Only ever called from the single pool thread, so no locking needed."""
+        import os
+        import struct
+        import subprocess
+        import sys
+        if os.environ.get("PARALANG_SMILE_PROCESS", "1") == "0":
+            return None
+        if cls.worker is not None and cls.worker.poll() is None:
+            return cls.worker
+        if cls.worker_starts >= cls.MAX_WORKER_STARTS:
+            return None
+        cls.worker_starts += 1
+        kw = {}
+        if os.name == "nt":
+            kw["creationflags"] = 0x00004000 | 0x08000000   # BELOW_NORMAL_PRIORITY | NO_WINDOW
+        else:
+            kw["preexec_fn"] = lambda: os.nice(10)
+        try:
+            w = subprocess.Popen([sys.executable, "-m", "paralang._smile_worker"],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, **kw)
+            ready = w.stdout.read(4)                    # blocks through the ~12 s prewarm
+            if ready != struct.pack("<I", 0):
+                raise RuntimeError(f"worker did not start (got {ready!r})")
+        except Exception as e:  # noqa: BLE001 - fall back to in-thread
+            import logging
+            logging.getLogger("paralang").warning("paralang: smile worker unavailable (%s)", e)
+            cls.worker = None
+            return None
+        cls.worker = w
+        return w
+
+    @classmethod
+    def voice_quality(cls, x, sr) -> dict:
+        """openSMILE in the worker process; in-thread if the worker is unavailable."""
+        import pickle
+        import struct
+        w = cls._ensure_worker()
+        if w is not None:
+            try:
+                data = pickle.dumps((x, sr))
+                w.stdin.write(struct.pack("<I", len(data)) + data)
+                w.stdin.flush()
+                (n,) = struct.unpack("<I", w.stdout.read(4))
+                return pickle.loads(w.stdout.read(n))
+            except Exception:  # noqa: BLE001 - worker died mid-call: kill it, compute here
+                try:
+                    w.kill()
+                except Exception:  # noqa: BLE001
+                    pass
+                cls.worker = None
+        from .features import voice_quality
+        return voice_quality(x, sr)
 
     @classmethod
     def mark_busy(cls, until: float) -> None:
@@ -167,11 +227,10 @@ class Analyzer:
         """Background voice-quality pass, started only once no turn has been
         measured for IDLE_S: it must never share the CPU with the fast path.
         Gives up waiting after IDLE_MAX_WAIT_S so a busy stream still gets data."""
-        from .features import voice_quality
         deadline = time.monotonic() + IDLE_MAX_WAIT_S
         while time.monotonic() < min(_Shared.busy_until, deadline) and not self._flush:
             time.sleep(0.02)
-        return voice_quality(x, sr)
+        return _Shared.voice_quality(x, sr)
 
     def wait_enrichment(self, timeout: float = 5.0) -> bool:
         """Block until queued voice-quality work is done (call at end of call,

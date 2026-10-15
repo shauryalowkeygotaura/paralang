@@ -136,8 +136,23 @@ VOICING_THRESHOLD = 0.45     # normalised autocorrelation peak needed to call a 
 _WIN_S, _HOP_S = 0.04, 0.01
 
 
+PITCH_SR = 8000             # F0 <= 400 Hz needs nowhere near 16-48 kHz; ~4x less FFT work
+
+
+def _decimate(x: np.ndarray, sr: int) -> tuple[np.ndarray, float]:
+    """Integer-factor downsample to ~PITCH_SR with a boxcar anti-alias average.
+    Speech harmonics above 4 kHz are weak, and the tracker only reads the
+    periodicity, so this costs no measurable pitch accuracy (tests: <5% at 8k)."""
+    factor = int(sr // PITCH_SR)
+    if factor < 2:
+        return x, float(sr)
+    n = len(x) // factor * factor
+    return x[:n].reshape(-1, factor).mean(axis=1), sr / factor
+
+
 def pitch_track(x: np.ndarray, sr: int) -> np.ndarray:
     """F0 in Hz per 10 ms frame, 0 where unvoiced. Vectorised: one FFT batch."""
+    x, sr = _decimate(np.asarray(x, dtype=np.float32), sr)
     win, hop = int(_WIN_S * sr), int(_HOP_S * sr)
     if len(x) < win:
         return np.zeros(0)

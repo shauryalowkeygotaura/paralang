@@ -37,6 +37,28 @@ STYLE = {
     "agitated":       (-10, -6, -10, 1.3), # calm, lower, softer: de-escalate
 }
 
+# For instructable engines (Orpheus, ElevenLabs...) a cue becomes a named
+# emotion they ACT, instead of rate/pitch numbers. Same intent as STYLE.
+CUE_EMOTION = {
+    "hesitant":       "empathetic",
+    "uncertain_rise": "warm",
+    "long_think":     "calm",
+    "rushed":         "confident",   # brisk and to the point
+    "barged_in":      "calm",
+    "flat":           "cheerful",
+    "agitated":       "calm",
+}
+CUE_EMOTION_MIN = 0.4
+
+
+def emotion_for(cues: list[Cue] | None, base: str = "warm") -> str:
+    """The emotion an instructable TTS should act for the caller's last turn:
+    the strongest cue at or above CUE_EMOTION_MIN, else `base`."""
+    best = max((c for c in cues or [] if c.name in CUE_EMOTION and c.strength >= CUE_EMOTION_MIN),
+               key=lambda c: c.strength, default=None)
+    return CUE_EMOTION[best.name] if best else base
+
+
 BASE_PAUSE_MS = {"?": 380, ".": 320, "!": 300, "…": 450, ",": 200}
 DEFAULT_PAUSE_MS = 260
 QUESTION_PITCH_HZ = 4       # questions sit slightly higher
