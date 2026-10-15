@@ -27,6 +27,7 @@ import json
 import os
 import re
 import socket
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -61,6 +62,79 @@ def _key() -> str:
     return k
 
 
+# ── connection reuse ────────────────────────────────────────────────────────
+# Measured 2026-10-15: TCP + TLS to api.deepgram.com alone took 1.3-2.1 s on a
+# slow line. A fresh urllib connection per sentence paid that every time; a
+# kept-alive connection pays it once per call (prewarm() even pays it before
+# the first sentence). http.client connections are not thread-safe, so they are
+# checked out of a small pool, one request at a time.
+HOST = "api.deepgram.com"
+_POOL: list = []
+_POOL_LOCK = threading.Lock()
+POOL_MAX = 4
+
+
+def _new_conn(timeout: float):
+    import http.client
+    import ssl
+    return http.client.HTTPSConnection(HOST, timeout=timeout, context=ssl.create_default_context())
+
+
+def _checkout(timeout: float):
+    with _POOL_LOCK:
+        c = _POOL.pop() if _POOL else None
+    if c is None:
+        return _new_conn(timeout), True
+    c.timeout = timeout
+    if c.sock is not None:
+        c.sock.settimeout(timeout)
+    return c, False
+
+
+def _checkin(c) -> None:
+    with _POOL_LOCK:
+        if len(_POOL) < POOL_MAX:
+            _POOL.append(c)
+            return
+    c.close()
+
+
+def prewarm(n: int = 1) -> int:
+    """Open n connections now (TCP + TLS) so the first sentence skips the
+    handshake. Safe to call from a background thread; returns how many opened."""
+    opened = 0
+    for _ in range(n):
+        try:
+            c = _new_conn(BATCH_TIMEOUT_S)
+            c.connect()
+            _checkin(c)
+            opened += 1
+        except OSError:
+            break
+    return opened
+
+
+def _request(path: str, body: bytes, headers: dict, timeout: float):
+    """POST on a pooled connection -> (conn, response). A connection the server
+    already closed (stale keep-alive) fails instantly, so that one case is
+    retried once on a fresh connection even in live mode."""
+    import http.client
+    for fresh_retry in (False, True):
+        c, is_new = (_new_conn(timeout), True) if fresh_retry else _checkout(timeout)
+        try:
+            c.request("POST", path, body=body, headers=headers)
+            return c, c.getresponse()
+        except (http.client.RemoteDisconnected, BrokenPipeError, ConnectionResetError,
+                http.client.CannotSendRequest, http.client.BadStatusLine) as e:
+            c.close()
+            if is_new:
+                raise ConnectionError(str(e)) from None
+        except BaseException:
+            c.close()
+            raise
+    raise ConnectionError("stale connection retry failed")
+
+
 def stream(text: str, voice: str = DEFAULT_VOICE, *, live: bool = False,
            chunk_bytes: int = 4800) -> Iterator[bytes]:
     """Yield raw PCM (24 kHz s16le mono) as it arrives (~100 ms per chunk)."""
@@ -68,49 +142,56 @@ def stream(text: str, voice: str = DEFAULT_VOICE, *, live: bool = False,
         raise ValueError(f"not an Aura voice id: {voice!r} (e.g. {DEFAULT_VOICE})")
     if not speakable(text):
         raise AuraError(f"not speakable by English Aura: {text[:40]!r}")
-    q = urllib.parse.urlencode({"model": voice, "encoding": "linear16",
-                                "sample_rate": SR, "container": "none"})
+    path = "/v1/speak?" + urllib.parse.urlencode({"model": voice, "encoding": "linear16",
+                                                  "sample_rate": SR, "container": "none"})
     body = json.dumps({"text": text}).encode("utf-8")
+    headers = {"Authorization": f"Token {_key()}", "Content-Type": "application/json",
+               "User-Agent": UA, "Connection": "keep-alive"}
+    timeout = LIVE_FIRST_BYTE_S if live else BATCH_TIMEOUT_S
     attempts = 1 if live else BATCH_RETRIES + 1
     for attempt in range(attempts):
-        req = urllib.request.Request(f"{URL}?{q}", data=body, method="POST", headers={
-            "Authorization": f"Token {_key()}", "Content-Type": "application/json", "User-Agent": UA})
         try:
-            r = urllib.request.urlopen(req, timeout=LIVE_FIRST_BYTE_S if live else BATCH_TIMEOUT_S)
-        except urllib.error.HTTPError as e:
-            detail = e.read().decode(errors="replace")[:200]
-            if e.code in (429, 500, 502, 503, 504) and attempt < attempts - 1:
-                time.sleep(float(e.headers.get("retry-after") or 2 ** attempt))
-                continue
-            raise AuraError(f"Deepgram HTTP {e.code}: {detail}") from None
-        except (urllib.error.URLError, TimeoutError, socket.timeout, ConnectionError) as e:
+            conn, r = _request(path, body, headers, timeout)
+        except (TimeoutError, socket.timeout, ConnectionError, OSError) as e:
             if attempt < attempts - 1:
                 time.sleep(2 ** attempt)
                 continue
             raise AuraError(f"Deepgram unreachable/slow ({'live' if live else 'batch'}): {e}") from None
-        with r:
-            # urllib's timeout applies per socket read, so in live mode every gap
-            # (first audio included) is capped at LIVE_FIRST_BYTE_S
-            carry, got = b"", False
-            try:
-                while True:
-                    more = r.read(chunk_bytes)
-                    if not more:
-                        break
-                    got = True
-                    carry += more
-                    even = len(carry) - len(carry) % 2
-                    if even:
-                        yield carry[:even]
-                        carry = carry[even:]
-            except (TimeoutError, socket.timeout, ConnectionError) as e:
-                if not got and attempt < attempts - 1:
-                    time.sleep(2 ** attempt)
-                    continue
-                raise AuraError(f"Deepgram stream broke: {e}") from None
-            if not got:
-                raise AuraError("Deepgram returned no audio")
-            return
+        if r.status != 200:
+            detail = r.read().decode(errors="replace")[:200]
+            _checkin(conn)
+            if r.status in (429, 500, 502, 503, 504) and attempt < attempts - 1:
+                time.sleep(float(r.getheader("retry-after") or 2 ** attempt))
+                continue
+            raise AuraError(f"Deepgram HTTP {r.status}: {detail}")
+        # timeouts are per socket read, so in live mode every gap is capped too
+        carry, got, ok = b"", False, False
+        try:
+            while True:
+                more = r.read(chunk_bytes)
+                if not more:
+                    break
+                got = True
+                carry += more
+                even = len(carry) - len(carry) % 2
+                if even:
+                    yield carry[:even]
+                    carry = carry[even:]
+            ok = True
+        except (TimeoutError, socket.timeout, ConnectionError, OSError) as e:
+            conn.close()
+            if not got and attempt < attempts - 1:
+                time.sleep(2 ** attempt)
+                continue
+            raise AuraError(f"Deepgram stream broke: {e}") from None
+        finally:
+            if ok:
+                _checkin(conn)          # fully read: safe to reuse for the next sentence
+            else:
+                conn.close()            # abandoned mid-stream (barge-in) or broken: never reuse
+        if not got:
+            raise AuraError("Deepgram returned no audio")
+        return
     raise AuraError("Deepgram: retries exhausted")
 
 

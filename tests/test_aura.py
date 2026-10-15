@@ -1,7 +1,6 @@
 """Aura (Andromeda) client + fallbacks, no network."""
 import io
 import socket
-import urllib.error
 
 import pytest
 
@@ -9,41 +8,64 @@ from paralang import aura, express
 from paralang import say
 
 
-class Resp(io.BytesIO):
-    def __enter__(self):
-        return self
+class FakeResp(io.BytesIO):
+    def __init__(self, data=b"", status=200, headers=None):
+        super().__init__(data)
+        self.status = status
+        self._h = headers or {}
 
-    def __exit__(self, *a):
-        return False
+    def getheader(self, k, default=None):
+        return self._h.get(k, default)
+
+
+class FakeConn:
+    def __init__(self):
+        self.closed = False
+        self.sock = None
+
+    def close(self):
+        self.closed = True
 
 
 @pytest.fixture(autouse=True)
-def key(monkeypatch):
+def env(monkeypatch):
     monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
     monkeypatch.setattr(aura.time, "sleep", lambda s: None)
+    aura._POOL.clear()
 
 
-def test_raw_pcm_streamed_whole_samples(monkeypatch):
+def test_raw_pcm_streamed_whole_samples_and_conn_reused(monkeypatch):
     pcm = bytes(range(256)) * 30 + b"\x07"
     seen = {}
+    conn = FakeConn()
 
-    def fake(req, timeout):
-        seen["url"], seen["timeout"] = req.full_url, timeout
-        return Resp(pcm)
-    monkeypatch.setattr(aura.urllib.request, "urlopen", fake)
+    def fake(path, body, headers, timeout):
+        seen.update(path=path, timeout=timeout, headers=headers)
+        return conn, FakeResp(pcm)
+    monkeypatch.setattr(aura, "_request", fake)
     out = aura.synth("Namaste ji.", live=True)
     assert out == pcm[:-1]
-    assert "model=aura-2-andromeda-en" in seen["url"] and "container=none" in seen["url"]
-    assert seen["timeout"] == aura.LIVE_FIRST_BYTE_S
+    assert "model=aura-2-andromeda-en" in seen["path"] and "container=none" in seen["path"]
+    assert seen["timeout"] == aura.LIVE_FIRST_BYTE_S and seen["headers"]["Connection"] == "keep-alive"
+    assert aura._POOL == [conn] and not conn.closed          # fully read -> back in the pool
 
 
-def test_live_slow_first_byte_fails_fast(monkeypatch):
+def test_abandoned_stream_closes_connection(monkeypatch):
+    conn = FakeConn()
+    monkeypatch.setattr(aura, "_request", lambda *a: (conn, FakeResp(b"\x00\x01" * 20000)))
+    g = aura.stream("Hello there.")
+    next(g)
+    g.close()                                    # caller barged in mid-sentence
+    assert conn.closed and aura._POOL == []
+
+
+def test_live_slow_fails_fast(monkeypatch):
     calls = {"n": 0}
 
-    def slow(req, timeout):
+    def slow(*a):
         calls["n"] += 1
         raise socket.timeout("timed out")
-    monkeypatch.setattr(aura.urllib.request, "urlopen", slow)
+    monkeypatch.setattr(aura, "_request", slow)
     with pytest.raises(aura.AuraError):
         aura.synth("Hello.", live=True)
     assert calls["n"] == 1                       # live: no retries, caller falls back
@@ -52,15 +74,33 @@ def test_live_slow_first_byte_fails_fast(monkeypatch):
 def test_batch_retries_timeouts_and_5xx(monkeypatch):
     calls = {"n": 0}
 
-    def flaky(req, timeout):
+    def flaky(*a):
         calls["n"] += 1
         if calls["n"] == 1:
             raise socket.timeout("timed out")
         if calls["n"] == 2:
-            raise urllib.error.HTTPError("u", 503, "busy", {}, io.BytesIO(b""))
-        return Resp(b"\x01\x00" * 10)
-    monkeypatch.setattr(aura.urllib.request, "urlopen", flaky)
+            return FakeConn(), FakeResp(b"busy", status=503)
+        return FakeConn(), FakeResp(b"\x01\x00" * 10)
+    monkeypatch.setattr(aura, "_request", flaky)
     assert aura.synth("Hello.") and calls["n"] == 3
+
+
+def test_stale_keepalive_retried_on_fresh_connection(monkeypatch):
+    import http.client
+
+    class Stale(FakeConn):
+        def request(self, *a, **k):
+            raise http.client.RemoteDisconnected("server closed idle conn")
+
+    class Fresh(FakeConn):
+        def request(self, *a, **k):
+            pass
+
+        def getresponse(self):
+            return FakeResp(b"\x02\x00" * 10)
+    aura._POOL.append(Stale())
+    monkeypatch.setattr(aura, "_new_conn", lambda timeout: Fresh())
+    assert aura.synth("Hi.", live=True) == b"\x02\x00" * 10   # even live: stale fails instantly
 
 
 def test_voice_whitelist_and_key(monkeypatch):
