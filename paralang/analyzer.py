@@ -29,6 +29,8 @@ PHRASE = {
     "uncertain_rise": "sounds unsure",
     "barged_in":      "interrupted you",
 }
+IDLE_S = 0.6            # hybrid: background openSMILE starts this long after the last turn
+IDLE_MAX_WAIT_S = 10.0  # ...or after this long regardless, so a busy stream still gets data
 TAG_MIN_STRENGTH = 0.4   # weaker cues go in the JSON but not in the LLM's prompt
 
 
@@ -71,22 +73,128 @@ class TurnResult:
         }
 
 
+def _opensmile_available() -> bool:
+    import importlib.util
+    return importlib.util.find_spec("opensmile") is not None
+
+
+class _Shared:
+    """One openSMILE worker and one "a turn is in flight" clock per PROCESS.
+
+    Several concurrent calls in one process (a phone server) must not each
+    spawn an openSMILE thread: they would load it N times and fight each other
+    for CPU while another call is on its critical path. One serial worker, one
+    shared idle signal: background work only runs when no call is measuring.
+    """
+    pool = None
+    busy_until = 0.0
+    lock = __import__("threading").Lock()
+
+    @classmethod
+    def get_pool(cls):
+        with cls.lock:
+            if cls.pool is None:
+                from concurrent.futures import ThreadPoolExecutor
+                from .features import prewarm
+                cls.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="paralang-smile")
+                cls.pool.submit(prewarm)          # ~12 s cold load happens here, once
+            return cls.pool
+
+    @classmethod
+    def mark_busy(cls, until: float) -> None:
+        with cls.lock:
+            cls.busy_until = max(cls.busy_until, until) if until > time.monotonic() else until
+
+
+def _attach(feats: TurnFeatures, fut) -> None:
+    """Merge background voice-quality results into the turn's features."""
+    try:
+        vq = fut.result()
+    except Exception:  # noqa: BLE001 - enrichment is best-effort, logged in voice_quality
+        return
+    for k in ("jitter", "shimmer_db", "hnr_db"):
+        if vq.get(k) is not None:
+            setattr(feats, k, vq[k])
+    if vq.get("f0_median_st") is not None:
+        # kept beside the fast tracker's value so real calls can validate it
+        feats.extras["smile_f0_median_st"] = round(vq["f0_median_st"], 3)
+
+
 class Analyzer:
-    def __init__(self, warmup_turns: int = 3, acoustic: bool | str = "fast"):
-        """acoustic: "fast" (numpy pitch, ~ms, default) | "full" (openSMILE) | False."""
+    def __init__(self, warmup_turns: int = 3, acoustic: bool | str = "hybrid"):
+        """acoustic modes (nothing is dropped in the default):
+
+        "hybrid" (default): numpy pitch + loudness on the critical path (~17 ms),
+                  so cues and the tag are ready instantly; openSMILE then adds
+                  jitter / shimmer / HNR / its own F0 in a background worker,
+                  prewarmed at construction so turn 1 never pays the ~12 s load.
+                  Falls back to "fast" if openSMILE is not installed.
+        "full":   openSMILE on the critical path (blocking, ~150 ms warm).
+        "fast":   numpy only.   False: timing/text features only.
+        """
         self.baseline = Baseline(warmup=warmup_turns)
-        self.acoustic = "fast" if acoustic is True else acoustic
-        if self.acoustic == "full":
-            # openSMILE takes ~12 s to load cold; do it now, off-thread, not on turn 1
-            import threading
-            from .features import prewarm
-            threading.Thread(target=prewarm, daemon=True, name="paralang-prewarm").start()
+        mode = "hybrid" if acoustic is True else acoustic
+        if mode == "hybrid" and not _opensmile_available():
+            mode = "fast"
+        self.acoustic = mode
         self.turns: list[TurnResult] = []
+        self._pool = None
+        self._enrich: list = []
+        self._flush = False
+        if mode in ("hybrid", "full"):
+            self._pool = _Shared.get_pool()   # shared, prewarmed once per process
 
     def features(self, audio, sample_rate: int, text: str = "", **kw) -> TurnFeatures:
         """Measurement only (no state, safe in a worker thread). Lets live
-        adapters run the slow part before the transcript even arrives."""
-        return extract(audio, sample_rate, text, acoustic=self.acoustic, **kw)
+        adapters run the slow part before the transcript even arrives.
+        In hybrid mode this is the fast measurement; voice quality is queued."""
+        if self.acoustic != "hybrid":
+            return extract(audio, sample_rate, text, acoustic=self.acoustic, **kw)
+        _Shared.mark_busy(time.monotonic() + 10)   # a turn is in flight: background waits
+        try:
+            feats = extract(audio, sample_rate, text, acoustic="fast", **kw)
+        finally:
+            _Shared.busy_until = time.monotonic() + IDLE_S
+        if feats.f0_median_st is not None:   # enough voice to be worth measuring
+            from .features import to_float_mono
+            x = to_float_mono(audio, sample_rate, kw.get("num_channels", 1))
+            fut = self._pool.submit(self._when_idle, x, sample_rate)
+            fut.add_done_callback(lambda f, feats=feats: _attach(feats, f))
+            self._enrich.append(fut)
+        return feats
+
+    def _when_idle(self, x, sr) -> dict:
+        """Background voice-quality pass, started only once no turn has been
+        measured for IDLE_S: it must never share the CPU with the fast path.
+        Gives up waiting after IDLE_MAX_WAIT_S so a busy stream still gets data."""
+        from .features import voice_quality
+        deadline = time.monotonic() + IDLE_MAX_WAIT_S
+        while time.monotonic() < min(_Shared.busy_until, deadline) and not self._flush:
+            time.sleep(0.02)
+        return voice_quality(x, sr)
+
+    def wait_enrichment(self, timeout: float = 5.0) -> bool:
+        """Block until queued voice-quality work is done (call at end of call,
+        before exporting). Returns False if it timed out."""
+        from concurrent.futures import wait
+        pending = [f for f in self._enrich if not f.done()]
+        if not pending:
+            return True
+        self._flush = True            # caller is waiting: stop deferring for idleness
+        try:
+            done, not_done = wait(pending, timeout=timeout)
+        finally:
+            self._flush = False
+        return not not_done
+
+    def export(self, timeout: float = 5.0) -> list[dict]:
+        """Every turn as JSON, after waiting for background enrichment."""
+        self.wait_enrichment(timeout)
+        return [t.to_dict() for t in self.turns]
+
+    def close(self) -> None:
+        for f in self._enrich:
+            f.cancel()                      # this call's queued work only; pool is shared
 
     def score(self, feats: TurnFeatures, text: str = "", elapsed_ms: float = 0.0) -> TurnResult:
         """Stateful part: z against baseline, derive cues, then grow the baseline."""

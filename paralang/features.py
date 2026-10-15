@@ -203,6 +203,16 @@ def _acoustics(x: np.ndarray, sr: int, mode: str) -> dict:
         return {}
 
 
+def voice_quality(x: np.ndarray, sr: int) -> dict:
+    """openSMILE jitter / shimmer / HNR / F0 for a float mono turn. Used by the
+    hybrid Analyzer in a background worker; {} on any failure."""
+    try:
+        return _acoustics_opensmile(x, sr)
+    except Exception as e:  # noqa: BLE001 - boundary with a native lib
+        log.warning("paralang: voice quality skipped (%s: %s)", type(e).__name__, e)
+        return {}
+
+
 def _acoustics_opensmile(x: np.ndarray, sr: int) -> dict:
     lld = _smile().process_signal(x, sr)
     f0 = lld["F0semitoneFrom27.5Hz_sma3nz"].to_numpy()   # 0 where unvoiced
