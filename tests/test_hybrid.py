@@ -19,8 +19,9 @@ def voice(secs, f0=150):
 def test_hybrid_is_default_and_critical_path_is_fast():
     an = Analyzer()
     assert an.acoustic == "hybrid"
-    an.wait_enrichment(30)          # let the prewarm finish so we time steady state
-    an._pool.submit(lambda: None).result(30)
+    # one-time worker start + openSMILE load (~12 s, longer on a busy box); the
+    # 30 ms budget below is for steady-state turns, which is what a call sees
+    an._pool.submit(lambda: None).result(120)
     times = []
     for _ in range(5):
         t0 = time.perf_counter()

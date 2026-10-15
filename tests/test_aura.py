@@ -125,7 +125,7 @@ def test_aura_pcm_fallbacks_neerja_and_swara(monkeypatch):
         return b"ED"
     monkeypatch.setattr(aura, "synth", fake_aura)
     monkeypatch.setattr(say, "_synth", fake_edge)
-    s = express("Namaste ji. आपका प्लान कल खत्म होगा। This will fail now.", wobble=False)
+    s = express("Hello there, good morning. आपका प्लान कल खत्म होगा। This will fail now, sadly enough.", wobble=False)
     say.aura_pcm(s)
     assert used == [("aura", "aura-2-andromeda-en"), ("edge", "hi-IN-SwaraNeural"),
                     ("edge", "en-IN-NeerjaNeural")]

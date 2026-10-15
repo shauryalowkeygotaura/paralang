@@ -172,15 +172,22 @@ def orpheus_pcm(script, voice: str = "troy", *, fallback_voice: str = DEFAULT_VO
 
 
 def aura_pcm(script, voice: str = "aura-2-andromeda-en", *, fallback_voice: str = DEFAULT_VOICE,
-             live: bool = False) -> bytes:
-    """Deepgram Aura-2 (Andromeda): one request per sentence, planner gaps
-    between, never retimed. A sentence Aura cannot say goes to edge so nothing
-    is dropped: Devanagari -> Swara (hi-IN), any Aura failure -> Neerja, both
-    with the planner's rate/pitch/volume knobs."""
+             live: bool = False, hindi_voice: str | None = None) -> bytes:
+    """Deepgram Aura-2 (Andromeda) for English, switched on the fly per sentence:
+    a Hindi sentence (Devanagari or romanized, paralang.lang) is spoken by edge
+    Swara, the one Hindi voice, because Andromeda garbles Hindi (samples/hindi_ab).
+    Once a paragraph turns Hindi it stays Hindi until a clearly English sentence
+    of SHORT_WORDS+ words. An English sentence Aura fails on -> edge Neerja.
+    One request per sentence, planner gaps between, never retimed."""
     from . import aura
-    pcm = bytearray()
+    from .lang import HINDI_VOICE, ReplyRouter
+    hindi_voice = hindi_voice or HINDI_VOICE
+    router, pcm = ReplyRouter(), bytearray()
     for line, (sentence, pause) in zip(script.lines, to_aura(script)):
         pcm += b"\x00\x00" * (SR * pause // 1000)
+        if router.lang(sentence, reply_id=id(script)) == "hi":
+            pcm += asyncio.run(_synth(sentence, hindi_voice, line.prosody.edge()))
+            continue
         if aura.speakable(sentence):
             try:
                 pcm += aura.synth(sentence, voice, live=live)
