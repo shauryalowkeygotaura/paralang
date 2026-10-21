@@ -29,6 +29,7 @@ PHRASE = {
     "uncertain_rise": "sounds unsure",
     "barged_in":      "interrupted you",
     "noisy":          "noisy line",
+    "machine":        "answering machine or IVR, not a person",
 }
 IDLE_S = 0.6            # hybrid: background openSMILE starts this long after the last turn
 IDLE_MAX_WAIT_S = 10.0  # ...or after this long regardless, so a busy stream still gets data
@@ -260,6 +261,11 @@ class Analyzer:
         """Stateful part: z against baseline, derive cues, then grow the baseline."""
         z = self.baseline.z(feats)
         cues = derive_cues(feats, z)
+        if len(self.turns) < 2:   # v0.3 #7: person, voicemail, IVR or hold music?
+            from .machine import classify
+            v = classify(feats, text, len(self.turns) + 1)
+            if v.kind != "human":
+                cues.append(Cue("machine", v.confidence, {"kind": v.kind, **v.evidence}))
         res = TurnResult(turn=len(self.turns) + 1, text=text, features=feats, z=z, cues=cues,
                          baseline_ready=self.baseline.frozen, elapsed_ms=elapsed_ms)
         self.baseline.update(feats)

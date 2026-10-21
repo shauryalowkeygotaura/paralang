@@ -324,6 +324,11 @@ def extract(audio, sample_rate: int, text: str = "", *, num_channels: int = 1,
         noise_db=noise_db,
         snr_db=snr_db,
     )
+    try:   # v0.3 #7: voicemail beep detector input (~1 ms); never break a turn
+        from .machine import beep_seconds
+        feats.extras["beep_s"] = round(beep_seconds(x, sample_rate), 3)
+    except Exception as e:  # noqa: BLE001
+        log.warning("paralang: beep check skipped (%s)", e)
     if mode and voiced_s >= MIN_ACOUSTIC_S:
         # loudness is always the numpy dB value so its units never depend on the mode
         feats.loudness = _loudness_db(x, sample_rate, mask)

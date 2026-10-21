@@ -45,12 +45,14 @@ STALE_SEGMENT_S = 6.0    # a segment with no transcript by now was empty/dropped
 FEATURE_WAIT_S = 0.5     # never hold a transcript longer than this for features
 MAX_TURN_S = 60          # cap buffered audio per turn (a stuck VAD must not eat RAM)
 CUT_OFF_S = 1.0          # caller resumes this soon after the agent starts = they were cut off
+BEEP_WATCH_S = 20.0      # voicemail beeps come within the first ~20 s of an answered call
 
 
 class ParalangProcessor(FrameProcessor):
     def __init__(self, analyzer: Analyzer | None = None, *, annotate: bool = True,
                  on_turn: Callable[[TurnResult], Awaitable[None] | None] | None = None,
-                 on_language: Callable[[str | None], None] | None = None, **kwargs):
+                 on_language: Callable[[str | None], None] | None = None,
+                 on_machine: Callable | None = None, **kwargs):
         super().__init__(**kwargs)
         self.analyzer = analyzer or Analyzer()
         self.annotate = annotate
@@ -71,6 +73,13 @@ class ParalangProcessor(FrameProcessor):
         self._user_stopped_at: float | None = None
         self._bot_started_at: float | None = None
         self.turn_timing = {"reply_gaps": [], "cut_offs": 0}
+        # v0.3 #7: a voicemail beep comes AFTER the greeting and VAD ignores pure
+        # tones, so it is never inside a caller turn; scan non-speech audio early on
+        self.on_machine = on_machine
+        self._beep_buf = bytearray()
+        self._beep_scanned = 0
+        self._audio_seen_s = 0.0
+        self.machine_verdict = None
         self._pending: deque[tuple[float, asyncio.Task]] = deque()  # (stopped_at, features task)
 
     # ── frame routing ────────────────────────────────────────────────────────
@@ -97,6 +106,9 @@ class ParalangProcessor(FrameProcessor):
     # ── audio + segmentation ─────────────────────────────────────────────────
     def _on_audio(self, frame: InputAudioRawFrame) -> None:
         self._sr, self._ch = frame.sample_rate, frame.num_channels
+        self._audio_seen_s += len(frame.audio) / (2 * self._ch * self._sr)
+        if not self._speaking and self.machine_verdict is None and self._audio_seen_s <= BEEP_WATCH_S:
+            self._watch_beep(frame.audio)
         if self._speaking:
             if len(self._buf) < MAX_TURN_S * self._sr * 2 * self._ch:
                 self._buf.extend(frame.audio)
@@ -106,6 +118,25 @@ class ParalangProcessor(FrameProcessor):
         limit = int(PREROLL_S * self._sr) * 2 * self._ch
         while self._preroll and self._preroll_bytes - len(self._preroll[0]) >= limit:
             self._preroll_bytes -= len(self._preroll.popleft())
+
+    def _watch_beep(self, audio: bytes) -> None:
+        """Rolling 1 s window of non-speech audio, checked every 0.25 s (~1 ms)."""
+        from ..features import to_float_mono
+        from ..machine import BEEP_MIN_S, Verdict, beep_seconds
+        self._beep_buf.extend(audio)
+        window = int(self._sr) * 2 * self._ch
+        if len(self._beep_buf) > window:
+            del self._beep_buf[: len(self._beep_buf) - window]
+        self._beep_scanned += len(audio)
+        if self._beep_scanned < window // 4:
+            return
+        self._beep_scanned = 0
+        beep = beep_seconds(to_float_mono(bytes(self._beep_buf), self._sr, self._ch), self._sr)
+        if beep >= BEEP_MIN_S:
+            self.machine_verdict = Verdict("voicemail", 0.9, {"beep_s": round(beep, 3)})
+            logger.info(f"paralang: voicemail beep ({beep:.2f} s) at {self._audio_seen_s:.1f} s")
+            if self.on_machine:
+                self.on_machine(self.machine_verdict)
 
     def _on_bot_started(self) -> None:
         now = time.time()
