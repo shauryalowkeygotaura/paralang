@@ -63,7 +63,7 @@ def transcript_lang(text: str) -> str | None:
     is Hindi for us. None = nothing to go on (empty / 1 word)."""
     if _ARABIC.search(text):
         return "hi"
-    if len(re.findall(r"\w+", text)) < 2:
+    if len(text.split()) < 2:
         return None
     return detect_lang(text)
 
@@ -109,7 +109,7 @@ class ReplyRouter:
     def lang(self, sentence: str, reply_id: object = None, caller_text: str = "") -> str:
         if reply_id is None or reply_id != self._reply_id:
             self._reply_id, self._reply_lang = reply_id, None
-        words = re.findall(r"\w+", sentence)
+        words = sentence.split()
         lang = detect_lang(sentence)
         if self._reply_lang == "hi":
             # sticky, released only by a clearly English sentence: RELEASE_WORDS+

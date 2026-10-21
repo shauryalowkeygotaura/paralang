@@ -211,3 +211,98 @@ if _GroqSTT is not None:
             if self._settings.temperature is not None:
                 kwargs["temperature"] = self._settings.temperature
             return await self._client.audio.transcriptions.create(**kwargs)
+
+
+# ── backchannel-aware interruptions (v0.3 #1) ───────────────────────────────
+from pipecat.frames.frames import InterimTranscriptionFrame  # noqa: E402
+from pipecat.turns.types import ProcessFrameResult  # noqa: E402
+from pipecat.turns.user_start.base_user_turn_start_strategy import BaseUserTurnStartStrategy  # noqa: E402
+
+from ..backchannel import HOLD_S, is_backchannel  # noqa: E402
+
+
+class BackchannelAwareStartStrategy(BaseUserTurnStartStrategy):
+    """Replaces Pipecat's default [VAD, Transcription] start strategies.
+
+    Bot silent: caller speech starts a turn at once (same as VAD strategy).
+    Bot speaking: the sound is held. Still speaking after HOLD_S -> real
+    interruption. Stopped sooner -> wait for its transcript: only backchannel
+    tokens ("haan", "hmm", "ok") -> the agent keeps talking and the token is
+    dropped from the context; anything else -> interruption.
+
+        LLMUserAggregatorParams(..., user_turn_strategies=UserTurnStrategies(
+            start=[BackchannelAwareStartStrategy()]))
+    """
+
+    def __init__(self, *, hold_s: float = HOLD_S, on_backchannel=None, **kwargs):
+        super().__init__(**kwargs)
+        self._hold_s = hold_s
+        self._on_backchannel = on_backchannel
+        self._bot_speaking = False
+        self._pending = False          # caller sound held during agent speech
+        self._user_speaking = False
+        self._timer: asyncio.Task | None = None
+        self.counts = {"backchannel": 0, "interruption": 0}
+
+    async def handle_user_turn_started(self):
+        self._cancel_timer()
+        self._pending = False
+
+    def _cancel_timer(self):
+        if self._timer and not self._timer.done():
+            self._timer.cancel()
+        self._timer = None
+
+    async def _start(self, why: str):
+        self._cancel_timer()
+        self._pending = False
+        if self._bot_speaking:
+            self.counts["interruption"] += 1
+            logger.debug(f"paralang: interruption ({why})")
+        await self.trigger_user_turn_started()
+
+    async def _hold_then_decide(self):
+        try:
+            await asyncio.sleep(self._hold_s)
+        except asyncio.CancelledError:
+            return
+        if self._pending and self._user_speaking:
+            await self._start("still speaking after hold")
+
+    async def process_frame(self, frame: Frame) -> ProcessFrameResult:
+        if isinstance(frame, BotStartedSpeakingFrame):
+            self._bot_speaking = True
+        elif isinstance(frame, BotStoppedSpeakingFrame):
+            self._bot_speaking = False
+            if self._pending and self._user_speaking:   # agent finished while caller talks
+                await self._start("bot finished, caller still talking")
+                return ProcessFrameResult.STOP
+        elif isinstance(frame, VADUserStartedSpeakingFrame):
+            self._user_speaking = True
+            if not self._bot_speaking:
+                await self._start("vad")
+                return ProcessFrameResult.STOP
+            self._pending = True
+            self._cancel_timer()
+            self._timer = asyncio.create_task(self._hold_then_decide())
+        elif isinstance(frame, VADUserStoppedSpeakingFrame):
+            self._user_speaking = False
+        elif isinstance(frame, (TranscriptionFrame, InterimTranscriptionFrame)):
+            if self._pending:
+                if isinstance(frame, InterimTranscriptionFrame):
+                    return ProcessFrameResult.CONTINUE
+                if is_backchannel(frame.text):
+                    self._cancel_timer()
+                    self._pending = False
+                    self.counts["backchannel"] += 1
+                    logger.debug(f"paralang: backchannel {frame.text!r}, agent keeps talking")
+                    if self._on_backchannel:
+                        self._on_backchannel(frame.text)
+                    await self.trigger_reset_aggregation()   # "haan" never becomes a turn
+                    return ProcessFrameResult.STOP
+                await self._start(f"words: {frame.text[:30]!r}")
+                return ProcessFrameResult.STOP
+            if not self._bot_speaking and isinstance(frame, TranscriptionFrame) and frame.text.strip():
+                await self._start("transcription without vad")
+                return ProcessFrameResult.STOP
+        return ProcessFrameResult.CONTINUE
