@@ -44,6 +44,7 @@ PREROLL_S = 0.5          # VAD confirms speech only after start_secs; keep audio
 STALE_SEGMENT_S = 6.0    # a segment with no transcript by now was empty/dropped by STT
 FEATURE_WAIT_S = 0.5     # never hold a transcript longer than this for features
 MAX_TURN_S = 60          # cap buffered audio per turn (a stuck VAD must not eat RAM)
+CUT_OFF_S = 1.0          # caller resumes this soon after the agent starts = they were cut off
 
 
 class ParalangProcessor(FrameProcessor):
@@ -66,6 +67,10 @@ class ParalangProcessor(FrameProcessor):
         self._seg_meta: dict = {}
         self._bot_speaking = False
         self._bot_stopped_at: float | None = None
+        # v0.3 #2 end-of-turn telemetry (smart-turn v3 decides; this measures it)
+        self._user_stopped_at: float | None = None
+        self._bot_started_at: float | None = None
+        self.turn_timing = {"reply_gaps": [], "cut_offs": 0}
         self._pending: deque[tuple[float, asyncio.Task]] = deque()  # (stopped_at, features task)
 
     # ── frame routing ────────────────────────────────────────────────────────
@@ -80,6 +85,7 @@ class ParalangProcessor(FrameProcessor):
             self._on_user_stopped()
         elif isinstance(frame, BotStartedSpeakingFrame):
             self._bot_speaking = True
+            self._on_bot_started()
         elif isinstance(frame, BotStoppedSpeakingFrame):
             self._bot_speaking = False
             self._bot_stopped_at = time.time()
@@ -101,11 +107,28 @@ class ParalangProcessor(FrameProcessor):
         while self._preroll and self._preroll_bytes - len(self._preroll[0]) >= limit:
             self._preroll_bytes -= len(self._preroll.popleft())
 
+    def _on_bot_started(self) -> None:
+        now = time.time()
+        self._bot_started_at = now
+        if self._user_stopped_at is not None:
+            gap = now - self._user_stopped_at
+            self.turn_timing["reply_gaps"].append(round(gap, 3))
+            if self.analyzer.turns:
+                self.analyzer.turns[-1].features.extras["agent_reply_gap_s"] = round(gap, 3)
+            self._user_stopped_at = None
+
     def _on_user_started(self, frame: VADUserStartedSpeakingFrame) -> None:
         # Upstream and downstream copies of the same broadcast both reach us; ignore the second.
         if self._speaking:
             return
         self._speaking = True
+        # cut-off: the caller resumes within CUT_OFF_S of the agent starting to
+        # reply, i.e. the turn was ended before they were done
+        if (self._bot_speaking and self._bot_started_at is not None
+                and time.time() - self._bot_started_at < CUT_OFF_S):
+            self.turn_timing["cut_offs"] += 1
+            if self.analyzer.turns:
+                self.analyzer.turns[-1].features.extras["cut_off"] = True
         self._buf = bytearray(b"".join(self._preroll))
         self._preroll.clear()
         self._preroll_bytes = 0
@@ -119,6 +142,7 @@ class ParalangProcessor(FrameProcessor):
     def _on_user_stopped(self) -> None:
         if not self._speaking:
             return
+        self._user_stopped_at = time.time()
         self._speaking = False
         audio, meta = bytes(self._buf), self._seg_meta
         self._buf = bytearray()

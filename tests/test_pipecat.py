@@ -100,3 +100,22 @@ def test_auto_language_stt_sends_no_language_until_hinted():
     stt.set_language_hint("hi")
     asyncio.run(stt._transcribe(b"RIFF"))
     assert "language" not in sent[0] and sent[1]["language"] == "hi"
+
+
+@pytest.mark.asyncio
+async def test_turn_timing_reply_gap_and_cut_off():
+    proc = ParalangProcessor(Analyzer(acoustic=False))
+    t = time.time()
+    frames = [
+        VADUserStartedSpeakingFrame(start_secs=0.2, timestamp=t), *voice_chunks(0.6),
+        VADUserStoppedSpeakingFrame(stop_secs=0.2), SleepFrame(sleep=0.2),
+        TranscriptionFrame(text="mera plan kab", user_id="u", timestamp="t"),
+        SleepFrame(sleep=0.3), BotStartedSpeakingFrame(),             # reply after ~0.5 s
+        SleepFrame(sleep=0.2),
+        VADUserStartedSpeakingFrame(start_secs=0.2, timestamp=time.time() + 0.7),  # caller resumes: cut off
+    ]
+    await run_test(proc, frames_to_send=frames, expected_down_frames=None)
+    gaps = proc.turn_timing["reply_gaps"]
+    assert len(gaps) == 1 and 0.3 < gaps[0] < 1.5
+    assert proc.turn_timing["cut_offs"] == 1
+    assert proc.analyzer.turns[-1].features.extras["cut_off"] is True
