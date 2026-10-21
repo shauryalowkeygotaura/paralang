@@ -68,3 +68,35 @@ async def test_quick_answer_passes_through_untagged():
     ]
     down, _ = await run_test(proc, frames_to_send=frames, expected_down_frames=None)
     assert [f.text for f in down if isinstance(f, TranscriptionFrame)] == ["haan ji"]
+
+
+@pytest.mark.asyncio
+async def test_language_hint_emitted_on_switch():
+    hints = []
+    proc = ParalangProcessor(Analyzer(acoustic=False), on_language=hints.append)
+    frames = []
+    for text in ("Mera plan kab khatam hoga ji", "Haan ji bataiye kitne ka hai"):
+        t = time.time()
+        frames += [VADUserStartedSpeakingFrame(start_secs=0.2, timestamp=t), *voice_chunks(0.6),
+                   VADUserStoppedSpeakingFrame(stop_secs=0.8), SleepFrame(sleep=0.2),
+                   TranscriptionFrame(text=text, user_id="u", timestamp="t")]
+    await run_test(proc, frames_to_send=frames, expected_down_frames=None)
+    assert hints == ["hi"]
+
+
+def test_auto_language_stt_sends_no_language_until_hinted():
+    from paralang.adapters.pipecat import AutoLanguageGroqSTT
+    sent = []
+
+    class FakeClient:
+        class audio:
+            class transcriptions:
+                @staticmethod
+                async def create(**kw):
+                    sent.append(kw)
+    stt = AutoLanguageGroqSTT(api_key="x", settings=AutoLanguageGroqSTT.Settings(model="whisper-large-v3-turbo"))
+    stt._client = FakeClient()
+    asyncio.run(stt._transcribe(b"RIFF"))
+    stt.set_language_hint("hi")
+    asyncio.run(stt._transcribe(b"RIFF"))
+    assert "language" not in sent[0] and sent[1]["language"] == "hi"

@@ -54,3 +54,21 @@ def test_aura_pcm_switches_hindi_to_swara(monkeypatch):
                 "Koi baat nahi ji. Please call us back if anything changes at all.", wobble=False)
     say.aura_pcm(s)
     assert [u[0] for u in used] == ["aura", "hi-IN-SwaraNeural", "hi-IN-SwaraNeural", "aura"]
+
+
+def test_language_hint_policy():
+    from paralang.lang import LanguageHint
+    h = LanguageHint()
+    U = LanguageHint.UNCHANGED
+    assert h.observe("haan") is U                                   # 1 word: no evidence
+    assert h.observe("Mera plan kab khatam hoga ji") is U           # 1 turn: not enough yet
+    assert h.observe("Haan ji bataiye kitne ka hai") == "hi"        # 2 agree -> hint hi
+    assert h.observe("Accha theek hai bhej do") is U                # still hi
+    assert h.observe("Okay please send the details on WhatsApp") is None   # disagree -> auto
+    assert h.observe("Thank you, that works for me then") == "en"   # 2 agree -> en
+
+
+def test_urdu_script_misfire_is_hindi_immediately():
+    from paralang.lang import LanguageHint
+    h = LanguageHint()
+    assert h.observe("ہاں جی بتائیے") == "hi"                       # Whisper wrote Urdu for Hindi

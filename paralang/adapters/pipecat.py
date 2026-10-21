@@ -38,6 +38,7 @@ from pipecat.frames.frames import (
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 from ..analyzer import Analyzer, TurnResult
+from ..lang import LanguageHint
 
 PREROLL_S = 0.5          # VAD confirms speech only after start_secs; keep audio from before that
 STALE_SEGMENT_S = 6.0    # a segment with no transcript by now was empty/dropped by STT
@@ -47,11 +48,15 @@ MAX_TURN_S = 60          # cap buffered audio per turn (a stuck VAD must not eat
 
 class ParalangProcessor(FrameProcessor):
     def __init__(self, analyzer: Analyzer | None = None, *, annotate: bool = True,
-                 on_turn: Callable[[TurnResult], Awaitable[None] | None] | None = None, **kwargs):
+                 on_turn: Callable[[TurnResult], Awaitable[None] | None] | None = None,
+                 on_language: Callable[[str | None], None] | None = None, **kwargs):
         super().__init__(**kwargs)
         self.analyzer = analyzer or Analyzer()
         self.annotate = annotate
         self.on_turn = on_turn
+        # v0.3 #9: tell STT which language to expect (None = auto-detect)
+        self.on_language = on_language
+        self.language_hint = LanguageHint() if on_language else None
         self._buf = bytearray()
         self._preroll: deque[bytes] = deque()
         self._preroll_bytes = 0
@@ -146,6 +151,11 @@ class ParalangProcessor(FrameProcessor):
         if self.annotate and res.tag:
             frame.text = res.annotate(frame.text)
         logger.debug(f"paralang turn {res.turn}: {res.tag or '(no cues)'}")
+        if self.language_hint is not None:
+            change = self.language_hint.observe(res.text)   # the caller's words, untagged
+            if change is not LanguageHint.UNCHANGED:
+                logger.info(f"paralang: STT language hint -> {change or 'auto'}")
+                self.on_language(change)
         if self.on_turn:
             out = self.on_turn(res)
             if asyncio.iscoroutine(out):
@@ -159,3 +169,45 @@ def _apply_text(feats, text: str) -> None:
     feats.fillers = len(_FILLER_RE.findall(text or ""))
     feats.words_per_sec = (feats.words / feats.voiced_s
                            if feats.words and feats.voiced_s >= MIN_ACOUSTIC_S else None)
+
+
+# ── STT that can genuinely auto-detect (v0.3 #9) ────────────────────────────
+# Pipecat's GroqSTTService ALWAYS sends a language and defaults to "en", so a
+# Hindi caller was transcribed as forced English (found 2026-10-22). This
+# subclass sends no language until ParalangProcessor's LanguageHint sets one.
+try:
+    from pipecat.services.groq.stt import GroqSTTService as _GroqSTT
+except ImportError:  # pragma: no cover - groq extra not installed
+    _GroqSTT = None
+
+if _GroqSTT is not None:
+    class AutoLanguageGroqSTT(_GroqSTT):
+        """Groq Whisper with a runtime language hint; None = Whisper auto-detects.
+
+            stt = AutoLanguageGroqSTT(api_key=key, settings=AutoLanguageGroqSTT.Settings(
+                model="whisper-large-v3-turbo"))
+            ParalangProcessor(on_language=stt.set_language_hint)
+        """
+
+        def __init__(self, *args, language_hint: str | None = None, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.language_hint = language_hint
+
+        def set_language_hint(self, lang: str | None) -> None:
+            if lang not in (None, "hi", "en"):
+                raise ValueError(f"unsupported hint {lang!r}")
+            self.language_hint = lang
+
+        async def _transcribe(self, audio: bytes):
+            kwargs = {
+                "file": ("audio.wav", audio, "audio/wav"),
+                "model": self._settings.model,
+                "response_format": "verbose_json" if self._include_prob_metrics else "json",
+            }
+            if self.language_hint:
+                kwargs["language"] = self.language_hint
+            if self._settings.prompt is not None:
+                kwargs["prompt"] = self._settings.prompt
+            if self._settings.temperature is not None:
+                kwargs["temperature"] = self._settings.temperature
+            return await self._client.audio.transcriptions.create(**kwargs)

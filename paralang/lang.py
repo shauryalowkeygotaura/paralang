@@ -54,6 +54,51 @@ def detect_lang(text: str) -> str:
     return "hi" if hits / len(toks) >= THRESHOLD else "en"
 
 
+_ARABIC = re.compile(r"[؀-ۿ]")
+
+
+def transcript_lang(text: str) -> str | None:
+    """Language of what the CALLER said, from the STT transcript. Whisper's
+    auto-detect often hears short Hindi as Urdu and writes Arabic script: that
+    is Hindi for us. None = nothing to go on (empty / 1 word)."""
+    if _ARABIC.search(text):
+        return "hi"
+    if len(re.findall(r"\w+", text)) < 2:
+        return None
+    return detect_lang(text)
+
+
+class LanguageHint:
+    """Which language to tell STT to expect, from the caller's recent turns.
+
+    Starts on auto-detect (None). Once the last `agree` turns agree, hints that
+    language; when they disagree (the caller code-switched), goes back to auto.
+    observe() returns the NEW hint only when it changes, else the sentinel
+    UNCHANGED, so callers push a settings update only on a real switch.
+    """
+    UNCHANGED = object()
+
+    def __init__(self, agree: int = 2, initial: str | None = None):
+        self.agree = agree
+        self.hint = initial
+        self._recent: list[str] = []
+
+    def observe(self, transcript: str):
+        lang = transcript_lang(transcript)
+        if lang is None:
+            return self.UNCHANGED
+        self._recent = (self._recent + [lang])[-self.agree:]
+        if len(self._recent) < self.agree:
+            # one turn of evidence: only act on Urdu-script misfires (clearly wrong)
+            new = "hi" if _ARABIC.search(transcript) else self.hint
+        else:
+            new = self._recent[0] if len(set(self._recent)) == 1 else None
+        if new == self.hint:
+            return self.UNCHANGED
+        self.hint = new
+        return new
+
+
 class ReplyRouter:
     """Per-sentence language for one streamed reply (one instance per call)."""
 
