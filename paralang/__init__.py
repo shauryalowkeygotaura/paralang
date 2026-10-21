@@ -16,7 +16,7 @@ PROMPT_HINT = (
     "Caller turns may start with a [tone: ...] note measured from their voice "
     "(pauses, pace, pitch). Never read it aloud. Use it: if hesitant or unsure, "
     "slow down and offer one simple option; if rushed, be brief; if flat, ask one "
-    "easy question to re-engage."
+    "easy question to re-engage; if noisy line, use short sentences and offer to call back."
 )
 
 __all__ = ["Analyzer", "TurnResult", "TurnFeatures", "Cue", "extract", "derive_cues",

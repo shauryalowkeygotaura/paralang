@@ -56,6 +56,8 @@ class TurnFeatures:
     jitter: float | None = None
     shimmer_db: float | None = None
     hnr_db: float | None = None
+    noise_db: float | None = None             # background floor, dBFS (10th-pct frame)
+    snr_db: float | None = None               # speech level over that floor
     extras: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -77,19 +79,63 @@ def to_float_mono(audio, sample_rate: int, num_channels: int = 1) -> np.ndarray:
     return x
 
 
-def _voiced_mask(x: np.ndarray, sr: int) -> np.ndarray:
-    """Per-20ms-frame speech mask, relative to this turn's own loud frames.
+NOISE_MARGIN_DB = 6.0     # speech must sit this far above the noise floor
 
-    Relative (not absolute dB) so a quiet phone line and a loud headset get the
-    same treatment. The 95th-percentile frame stands in for "speaking level".
-    """
+
+def _frame_db(x: np.ndarray, sr: int) -> np.ndarray:
     n = max(1, int(sr * FRAME_S))
     frames = x[: len(x) // n * n].reshape(-1, n)
     if frames.size == 0:
+        return np.zeros(0)
+    return 20 * np.log10(np.sqrt((frames ** 2).mean(axis=1)) + 1e-9)
+
+
+def noise_stats(rms_db: np.ndarray) -> tuple[float | None, float | None]:
+    """(noise floor dB, SNR dB) for one turn. Floor = 10th-percentile frame (a
+    VAD turn always carries some pre-roll / trailing silence); speech level =
+    95th percentile. Needs ~0.5 s of frames to mean anything."""
+    if rms_db.size < 25:
+        return None, None
+    floor = float(np.percentile(rms_db, 10))
+    snr = float(np.percentile(rms_db, 95)) - floor
+    # Only trust a floor we actually observed: a >= 200 ms run of frames at it.
+    # Continuous speech has only short syllable dips, and its 10th-percentile
+    # frame is still speech; reading that as "noise" flagged clean lines noisy.
+    if snr < 3.0 or _longest_run(rms_db <= floor + 3.0) * FRAME_S < MIN_FLOOR_RUN_S:
+        return None, None
+    return floor, snr
+
+
+MIN_FLOOR_RUN_S = 0.2
+
+
+def _longest_run(mask: np.ndarray) -> int:
+    best = run = 0
+    for v in mask:
+        run = run + 1 if v else 0
+        best = max(best, run)
+    return best
+
+
+def _voiced_mask(x: np.ndarray, sr: int, rms_db: np.ndarray | None = None) -> np.ndarray:
+    """Per-20ms-frame speech mask, relative to this turn's own loud frames AND
+    its own noise floor.
+
+    Relative (not absolute dB) so a quiet phone line and a loud headset get the
+    same treatment. The 95th-percentile frame stands in for "speaking level".
+    The noise-floor term matters on bad lines: with speech only 12 dB above
+    street noise, "30 dB below peak" called the noise speech and no pause was
+    ever found (fixed 2026-10-22).
+    """
+    rms_db = _frame_db(x, sr) if rms_db is None else rms_db
+    if rms_db.size == 0:
         return np.zeros(0, dtype=bool)
-    rms_db = 20 * np.log10(np.sqrt((frames ** 2).mean(axis=1)) + 1e-9)
     peak = np.percentile(rms_db, 95)
-    return (rms_db > peak - SILENCE_DB_BELOW_PEAK) & (rms_db > -60)
+    threshold = peak - SILENCE_DB_BELOW_PEAK
+    floor, snr = noise_stats(rms_db)
+    if floor is not None and snr is not None and snr > NOISE_MARGIN_DB + 3:
+        threshold = max(threshold, floor + NOISE_MARGIN_DB)
+    return (rms_db > threshold) & (rms_db > -60)
 
 
 def _pauses(mask: np.ndarray) -> tuple[list[float], float]:
@@ -256,7 +302,9 @@ def extract(audio, sample_rate: int, text: str = "", *, num_channels: int = 1,
     acoustic: "fast" (numpy, default, ~ms), "full" (openSMILE, + jitter/shimmer/HNR), False."""
     mode = "fast" if acoustic is True else acoustic
     x = to_float_mono(audio, sample_rate, num_channels)
-    mask = _voiced_mask(x, sample_rate)
+    rms_db = _frame_db(x, sample_rate)
+    mask = _voiced_mask(x, sample_rate, rms_db)
+    noise_db, snr_db = noise_stats(rms_db)
     pauses, span = _pauses(mask)
     voiced_s = float(mask.sum() * FRAME_S)
     words = len(_WORD_RE.findall(text or ""))
@@ -273,6 +321,8 @@ def extract(audio, sample_rate: int, text: str = "", *, num_channels: int = 1,
         fillers=len(_FILLER_RE.findall(text or "")),
         response_latency_s=response_latency_s,
         barge_in=barge_in,
+        noise_db=noise_db,
+        snr_db=snr_db,
     )
     if mode and voiced_s >= MIN_ACOUSTIC_S:
         # loudness is always the numpy dB value so its units never depend on the mode

@@ -151,3 +151,39 @@ def test_noise_is_not_voiced():
     from paralang.features import pitch_track
     noise = np.random.default_rng(1).normal(0, 0.05, SR * 2).astype(np.float32)
     assert (pitch_track(noise, SR) > 0).sum() == 0
+
+
+def _noisy_call(snr_db, seed=3):
+    """1.0 s speech, 1.2 s pause, 1.0 s speech, plus white noise at a known SNR."""
+    speech = np.concatenate([tone(150, 1.0), np.zeros(int(1.2 * SR), np.float32), tone(150, 1.0)])
+    sig_rms = np.sqrt(np.mean(tone(150, 1.0) ** 2))
+    noise = np.random.default_rng(seed).normal(0, sig_rms / 10 ** (snr_db / 20), speech.size)
+    pad = np.random.default_rng(seed + 1).normal(0, sig_rms / 10 ** (snr_db / 20), int(0.5 * SR))
+    return np.concatenate([pad, speech + noise, pad]).astype(np.float32)
+
+
+@pytest.mark.parametrize("snr", [6, 12, 24])
+def test_snr_estimated_within_3db(snr):
+    f = extract(_noisy_call(snr), SR, acoustic=False)
+    assert abs(f.snr_db - snr) < 3, f.snr_db
+
+
+@pytest.mark.parametrize("snr", [12, 24])
+def test_pause_still_found_on_a_noisy_line(snr):
+    # before 2026-10-22 the "30 dB below peak" rule called 12 dB noise speech: no pause at all
+    f = extract(_noisy_call(snr), SR, acoustic=False)
+    assert abs(f.longest_pause_s - 1.2) < 0.15, f.longest_pause_s
+
+
+def test_noisy_cue_fires_on_bad_line_not_clean_one():
+    from paralang import Analyzer
+    bad = Analyzer(acoustic=False).analyze_turn(_noisy_call(6), SR, "haan ji theek hai")
+    clean = Analyzer(acoustic=False).analyze_turn(_noisy_call(30), SR, "haan ji theek hai")
+    assert any(c.name == "noisy" for c in bad.cues) and "noisy line" in bad.tag
+    assert not any(c.name == "noisy" for c in clean.cues)
+
+
+def test_continuous_speech_is_not_called_noisy():
+    # no silence anywhere: the noise floor is unobservable -> unknown, never "noisy"
+    f = extract(tone(150, 3.0), SR, acoustic=False)
+    assert f.snr_db is None

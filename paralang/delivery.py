@@ -35,6 +35,7 @@ STYLE = {
     "barged_in":      (+4,  0,  0, 0.7),
     "flat":           (+3, +6, +5, 0.9),   # a little brighter to re-engage
     "agitated":       (-10, -6, -10, 1.3), # calm, lower, softer: de-escalate
+    "noisy":          (-5,  0, +10, 1.2),  # slower and louder, so it carries over the noise
 }
 
 # For instructable engines (Orpheus, ElevenLabs...) a cue becomes a named

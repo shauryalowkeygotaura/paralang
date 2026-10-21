@@ -25,6 +25,7 @@ TRACKED = {
     "f0_median_st":      1.0,
     "f0_range_st":       1.0,
     "response_latency_s": 0.3,
+    "noise_db":          2.0,    # dB; a jump means the caller moved somewhere louder
 }
 
 

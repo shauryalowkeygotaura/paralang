@@ -28,6 +28,7 @@ PHRASE = {
     "agitated":       "agitated",
     "uncertain_rise": "sounds unsure",
     "barged_in":      "interrupted you",
+    "noisy":          "noisy line",
 }
 IDLE_S = 0.6            # hybrid: background openSMILE starts this long after the last turn
 IDLE_MAX_WAIT_S = 10.0  # ...or after this long regardless, so a busy stream still gets data

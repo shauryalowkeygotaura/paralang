@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 
 from .features import TurnFeatures
 
-CUE_NAMES = ("hesitant", "long_think", "rushed", "flat", "agitated", "uncertain_rise", "barged_in")
+CUE_NAMES = ("noisy", "hesitant", "long_think", "rushed", "flat", "agitated", "uncertain_rise", "barged_in")
 
 # Absolute fallbacks: used on turns 1-2 before the caller's baseline exists,
 # and as a hard floor after it. Only for things that are unambiguous in any voice.
@@ -79,6 +79,7 @@ def derive_cues(f: TurnFeatures, z: dict[str, float]) -> list[Cue]:
         cues.append(Cue("barged_in", 1.0, {}))
 
     cues += _hesitant(f, z) + _flat(f, z) + _agitated(f, z)
+    cues += _noisy(f, z)
     return cues
 
 
@@ -163,3 +164,19 @@ def _agitated(f: TurnFeatures, z: dict[str, float]) -> list[Cue]:
         return []
     return [Cue("agitated", s, {"signals": used, "z_loudness": z.get("loudness"),
                                 "z_f0": z.get("f0_median_st"), "z_rate": z.get("words_per_sec")})]
+
+
+# ── situation cues ──────────────────────────────────────────────────────────
+NOISY_SNR_DB = 12.0       # absolute: below this a phone line is hard to hear, in any voice
+
+
+def _noisy(f: TurnFeatures, z: dict[str, float]) -> list[Cue]:
+    """Bad line / loud surroundings. SNR is physics, not personality, so an
+    absolute floor is right here; a sudden noise jump vs the caller's own
+    baseline (walked onto a street) also counts."""
+    by_snr = _ramp(-(f.snr_db if f.snr_db is not None else 99.0), -NOISY_SNR_DB, -NOISY_SNR_DB + 6)
+    by_jump = _ramp(z.get("noise_db") or 0.0, 2.0, 3.5)
+    s = max(by_snr, by_jump)
+    if s <= 0:
+        return []
+    return [Cue("noisy", s, {"snr_db": f.snr_db, "noise_db": f.noise_db, "z_noise": z.get("noise_db")})]
