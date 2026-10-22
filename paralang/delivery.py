@@ -54,7 +54,11 @@ CUE_EMOTION_MIN = 0.4
 
 def emotion_for(cues: list[Cue] | None, base: str = "warm") -> str:
     """The emotion an instructable TTS should act for the caller's last turn:
-    the strongest cue at or above CUE_EMOTION_MIN, else `base`."""
+    the strongest cue at or above CUE_EMOTION_MIN, else `base`. Agitated
+    always wins: an angry caller who also talks fast must get calm, not the
+    brisk 'confident' that rushed maps to (a tie used to go to rushed)."""
+    if any(c.name == "agitated" and c.strength >= CUE_EMOTION_MIN for c in cues or []):
+        return CUE_EMOTION["agitated"]
     best = max((c for c in cues or [] if c.name in CUE_EMOTION and c.strength >= CUE_EMOTION_MIN),
                key=lambda c: c.strength, default=None)
     return CUE_EMOTION[best.name] if best else base
