@@ -17,7 +17,8 @@ PROMPT_HINT = (
     "(pauses, pace, pitch). Never read it aloud. Use it: if hesitant or unsure, "
     "slow down and offer one simple option; if rushed, be brief; if flat, ask one "
     "easy question to re-engage; if noisy line, use short sentences and offer to call back; if answering machine or IVR, "
-    "leave your one-line voicemail message and end the call."
+    "leave your one-line voicemail message and end the call. A [coach: ...] note is an "
+    "instruction for this one reply only: follow it, never read it aloud."
 )
 
 __all__ = ["Analyzer", "TurnResult", "TurnFeatures", "Cue", "extract", "derive_cues",

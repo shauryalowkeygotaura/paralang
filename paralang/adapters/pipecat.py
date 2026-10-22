@@ -52,7 +52,8 @@ class ParalangProcessor(FrameProcessor):
     def __init__(self, analyzer: Analyzer | None = None, *, annotate: bool = True,
                  on_turn: Callable[[TurnResult], Awaitable[None] | None] | None = None,
                  on_language: Callable[[str | None], None] | None = None,
-                 on_machine: Callable | None = None, **kwargs):
+                 on_machine: Callable | None = None, playbook=None,
+                 agent_text_fn: Callable[[], str] | None = None, **kwargs):
         super().__init__(**kwargs)
         self.analyzer = analyzer or Analyzer()
         self.annotate = annotate
@@ -80,6 +81,10 @@ class ParalangProcessor(FrameProcessor):
         self._beep_scanned = 0
         self._audio_seen_s = 0.0
         self.machine_verdict = None
+        # v0.3 #11: cue-triggered one-turn coaching (paralang.playbook.Playbook)
+        self.playbook = playbook
+        self.agent_text_fn = agent_text_fn or (lambda: "")
+        self.coached: list[dict] = []
         self._pending: deque[tuple[float, asyncio.Task]] = deque()  # (stopped_at, features task)
 
     # ── frame routing ────────────────────────────────────────────────────────
@@ -203,8 +208,14 @@ class ParalangProcessor(FrameProcessor):
             return
         _apply_text(feats, frame.text)
         res = self.analyzer.score(feats, frame.text, (time.perf_counter() - t0) * 1000)
-        if self.annotate and res.tag:
+        coach = self.playbook.advise(res, self.agent_text_fn()) if self.playbook else None
+        if coach:
+            self.coached.append({"turn": res.turn, "coach": coach})
+            logger.info(f"paralang coach (turn {res.turn}): {coach}")
+        if self.annotate and (res.tag or coach):
             frame.text = res.annotate(frame.text)
+            if coach:
+                frame.text = f"[coach: {coach}] {frame.text}"
         logger.debug(f"paralang turn {res.turn}: {res.tag or '(no cues)'}")
         if self.language_hint is not None:
             change = self.language_hint.observe(res.text)   # the caller's words, untagged
