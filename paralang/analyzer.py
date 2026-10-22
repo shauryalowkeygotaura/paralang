@@ -29,6 +29,8 @@ PHRASE = {
     "uncertain_rise": "sounds unsure",
     "barged_in":      "interrupted you",
     "noisy":          "noisy line",
+    "laughed":        "laughed",
+    "sighed":         "sighed",
     "machine":        "answering machine or IVR, not a person",
 }
 IDLE_S = 0.6            # hybrid: background openSMILE starts this long after the last turn

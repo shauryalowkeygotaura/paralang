@@ -80,6 +80,7 @@ def derive_cues(f: TurnFeatures, z: dict[str, float]) -> list[Cue]:
 
     cues += _hesitant(f, z) + _flat(f, z) + _agitated(f, z)
     cues += _noisy(f, z)
+    cues += _nonverbal(f)
     return cues
 
 
@@ -180,3 +181,14 @@ def _noisy(f: TurnFeatures, z: dict[str, float]) -> list[Cue]:
     if s <= 0:
         return []
     return [Cue("noisy", s, {"snr_db": f.snr_db, "noise_db": f.noise_db, "z_noise": z.get("noise_db")})]
+
+
+def _nonverbal(f: TurnFeatures) -> list[Cue]:
+    """laughed / sighed from nonverbal.detect (stored in extras by extract())."""
+    out = []
+    for e in f.extras.get("nonverbal", []) or []:
+        name = {"laugh": "laughed", "sigh": "sighed"}.get(e.get("kind"))
+        if name:
+            out.append(Cue(name, float(e.get("strength", 0.5)), {"via": e.get("via"),
+                                                                  "at_s": e.get("start_s")}))
+    return out

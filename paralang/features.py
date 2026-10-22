@@ -267,7 +267,7 @@ def _acoustics(x: np.ndarray, sr: int, mode: str) -> dict:
             return _acoustics_opensmile(x, sr)
         hz = pitch_track(x, sr)
         st = np.where(hz > 0, 12 * np.log2(np.maximum(hz, 1e-9) / 27.5), 0.0)
-        return _pitch_stats(st, _HOP_S)
+        return {**_pitch_stats(st, _HOP_S), "_hz": hz}   # track reused by nonverbal (popped)
     except Exception as e:  # noqa: BLE001 - boundary with a native lib
         log.warning("paralang: acoustic features skipped (%s: %s)", type(e).__name__, e)
         return {}
@@ -332,6 +332,15 @@ def extract(audio, sample_rate: int, text: str = "", *, num_channels: int = 1,
     if mode and voiced_s >= MIN_ACOUSTIC_S:
         # loudness is always the numpy dB value so its units never depend on the mode
         feats.loudness = _loudness_db(x, sample_rate, mask)
-        for k, v in _acoustics(x, sample_rate, mode).items():
+        ac = _acoustics(x, sample_rate, mode)
+        hz = ac.pop("_hz", None)
+        for k, v in ac.items():
             setattr(feats, k, v)
+        try:   # v0.3 #8: laughs / sighs / breaths (heuristic; never breaks a turn)
+            from .nonverbal import detect
+            events, breaths = detect(rms_db, hz if hz is not None else pitch_track(x, sample_rate), text)
+            feats.extras["nonverbal"] = [e.to_dict() for e in events]
+            feats.extras["breaths"] = breaths
+        except Exception as e:  # noqa: BLE001
+            log.warning("paralang: nonverbal skipped (%s)", e)
     return feats

@@ -224,6 +224,8 @@ def _apply_text(feats, text: str) -> None:
     feats.fillers = len(_FILLER_RE.findall(text or ""))
     feats.words_per_sec = (feats.words / feats.voiced_s
                            if feats.words and feats.voiced_s >= MIN_ACOUSTIC_S else None)
+    from ..nonverbal import merge_words
+    feats.extras["nonverbal"] = merge_words(feats.extras.get("nonverbal", []), text)
 
 
 # ── STT that can genuinely auto-detect (v0.3 #9) ────────────────────────────
