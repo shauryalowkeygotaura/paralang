@@ -128,6 +128,13 @@ def _open(url: str, body: bytes, ctype: str, *, live: bool, timeout: float):
                 _Pool.cool(key, 3600)          # bad/revoked key: skip it for an hour
                 last_err = f"{e.code}"
                 continue
+            if e.code == 400 and "model_terms_required" in detail:
+                # this key's org never accepted Orpheus's terms; others in the pool may have
+                _Pool.cool(key, 86400)
+                last_err = "terms not accepted on some keys"
+                if all(_Pool.cooling.get(k, 0) > time.monotonic() + 3600 for k in _Pool.keys()):
+                    raise OrpheusError(f"Groq HTTP 400: no key's org has accepted Orpheus terms: {detail}") from None
+                continue
             raise OrpheusError(f"Groq HTTP {e.code}: {detail}") from None
         except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
             # transient resets (WinError 10054) happen; a batch render retries with
