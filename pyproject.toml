@@ -2,6 +2,8 @@
 name = "paralang"
 version = "0.2.0"
 description = "Paralinguistic cues (pauses, pace, pitch, loudness) for voice agents"
+readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.26"]
 
