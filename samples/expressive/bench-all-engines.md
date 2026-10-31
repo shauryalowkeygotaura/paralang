@@ -1,0 +1,20 @@
+| script | engine | mode | wer | f0_range_st | f0_move_st | dyn_db | pauses | pause_mean_s | pause_std_s | dur_s |
+|---|---|---|---|---|---|---|---|---|---|---|
+| hook | aura | plain | 0.059 | 8.44 | 1.45 | 5.23 | 10 | 0.86 | 0.27 | 26.19 |
+| hook | aura | expressive | 0.044 | 5.37 | 1.54 | 5.15 | 7 | 0.8 | 0.39 | 23.34 |
+| hook | edge | plain | 0.044 | 10.21 | 2.31 | 5.39 | 9 | 1.51 | 0.43 | 36.57 |
+| hook | edge | expressive | 0.0 | 10.28 | 2.36 | 5.45 | 9 | 0.6 | 0.13 | 27.4 |
+| hook | orpheus | plain | 0.044 | 12.74 | 2.99 | 5.85 | 13 | 0.6 | 0.19 | 30.48 |
+| hook | orpheus | expressive | 0.044 | 12.72 | 2.97 | 5.67 | 13 | 0.6 | 0.19 | 30.3 |
+| agent | aura | plain | 0.032 | 7.36 | 1.52 | 6.48 | 3 | 0.88 | 0.09 | 10.02 |
+| agent | aura | expressive | 0.065 | 10.03 | 1.45 | 6.51 | 3 | 0.79 | 0.05 | 9.99 |
+| agent | edge | plain | 0.065 | 11.54 | 2.41 | 4.52 | 4 | 1.21 | 0.53 | 14.18 |
+| agent | edge | expressive | 0.065 | 11.65 | 2.47 | 4.48 | 4 | 0.49 | 0.12 | 10.37 |
+| agent | orpheus | plain | 0.065 | 10.67 | 2.36 | 5.68 | 3 | 0.66 | 0.12 | 10.88 |
+| agent | orpheus | expressive | 0.065 | 10.37 | 2.34 | 5.23 | 3 | 0.66 | 0.12 | 10.04 |
+| excited | aura | plain | 0.059 | 8.45 | 1.54 | 5.73 | 3 | 0.83 | 0.01 | 6.85 |
+| excited | aura | expressive | 0.059 | 9.23 | 2.55 | 5.5 | 3 | 0.61 | 0.12 | 6.42 |
+| excited | edge | plain | 0.059 | 10.2 | 2.35 | 4.75 | 3 | 1.41 | 0.13 | 9.96 |
+| excited | edge | expressive | 0.059 | 11.36 | 2.17 | 4.18 | 3 | 0.43 | 0.05 | 6.05 |
+| excited | orpheus | plain | 0.059 | 7.94 | 1.99 | 4.55 | 3 | 0.87 | 0.06 | 7.76 |
+| excited | orpheus | expressive | 0.176 | 8.13 | 1.65 | 3.1 | 3 | 0.89 | 0.1 | 7.11 |
