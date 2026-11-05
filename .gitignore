@@ -4,3 +4,4 @@ __pycache__/
 .pytest_cache/
 samples/ab/*.wav
 samples/expressive/**/*.wav
+samples/fishlevel/*.wav

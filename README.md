@@ -6,6 +6,20 @@ Voice agents read transcripts. Transcripts lose *how* something was said. parala
 
 **Speaking.** Write `[warm] Hi there. [excited] Big news!` once and render it for any engine: Deepgram Aura-2, Groq Orpheus, edge-tts, or as a payload for SSML / Azure / ElevenLabs v3 / OpenAI / Gemini. Instructable engines act the emotion. Knob engines get rate/pitch/volume plus per-sentence variation and breathing gaps. `|` adds a beat and `*word*` adds emphasis.
 
+## Cues (Fish Audio style, on every engine)
+
+```
+[warm] Hi, this is Riya. [slightly sad] Oh no, a broken tooth? [sighing] That sounds painful.
+[angry][shouting] Get out! [soft tone] Okay. This is [emphasis] really important. Wait [break] what?
+```
+
+- Emotions: 34 named emotions plus about 150 synonyms (furious, wistful, deadpan...), with intensity words (slightly, very, extremely) or an explicit `[excited:0.5]`.
+- Tones: whispering, soft tone, shouting, slowly, in a hurry tone. Tones stack with an emotion.
+- Sounds: laughing, chuckling, sighing, gasping, breath, yawning, sobbing, groaning, clear throat, hmm.
+- Pacing: `[break]`, `[long-break]`, `[emphasis] word`, `|`, `*word*`.
+
+Acting engines (Orpheus, Fish, ElevenLabs) receive the cues verbatim. Aura and edge receive them as prosody plus **real nonverbal clips** from a cached, Whisper-gated sound bank (`python -m paralang.sounds --build`). Brackets are never read aloud. `python -m paralang.markup` can add cues to plain text.
+
 ## Install
 
 ```bash
