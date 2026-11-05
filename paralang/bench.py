@@ -129,6 +129,8 @@ def render(engine: str, name: str, text: str, expressive: bool) -> bytes:
         return say.aura_pcm(s, expressive=expressive)
     if engine == "orpheus":
         return say.orpheus_pcm(s, ORPHEUS_VOICE[name], expressive=expressive)
+    if engine == "fish":
+        return say.fish_pcm(s, expressive=expressive)
     import asyncio
     return asyncio.run(say.say_pcm(text, voice=EDGE_VOICE, expressive=expressive))
 

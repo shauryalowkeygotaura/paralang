@@ -16,6 +16,9 @@ Engines (default: aura; override with --engine or PARALANG_ENGINE):
   orpheus  Groq canopylabs/orpheus-v1-english, GROQ_API_KEY(S). ACTS the emotion;
            voices autumn diana hannah austin daniel troy. Same fallbacks.
   edge     free, knob-based emotion (rate/pitch/volume), any language.
+  fish     Fish Audio S2.1 (FISH_API_KEY; model s2.1-pro-free by default, FISH_MODEL to
+           change; voice = FISH_VOICE_ID). ACTS emotions and [laughing]/[sighing] cues,
+           80+ languages. A chunk Fish fails on goes to Aura.
 
     from paralang.say import say_wav
     say_wav("Take a breath.", "out.wav")                              # aura andromeda
@@ -77,6 +80,35 @@ def _finish(clips, expressive: bool) -> bytes:
     return assemble.join(clips) if expressive else assemble.raw(clips)
 
 
+SOUND_GAP_MS = 90      # breath between a spliced sound and the words around it
+
+
+def _line_plan(line, expressive: bool, sound_voice: str | None, live: bool):
+    """[(kind, value, gap_ms)] for one line on a knob engine: words to
+    synthesize, real nonverbal clips (sounds.py), and silences. The first
+    item carries the line's planner gap."""
+    from . import sounds
+    from .tts import _spoken, parts
+    plan, gap = [], line.prosody.pause_before_ms
+    items = parts(_spoken(line, directions=True))
+    texts = [i for i, (k, _) in enumerate(items) if k == "text"]
+    for i, (kind, val) in enumerate(items):
+        if kind == "pause":
+            gap += int(val)
+            continue
+        if kind == "sound":
+            pcm = sounds.get(val, sound_voice, seed=line.text, live=live)
+            if pcm:
+                plan.append(("pcm", pcm, gap))
+                gap = SOUND_GAP_MS
+            continue
+        if texts and i == texts[-1]:
+            val = _shaped(line, val, expressive)       # endings shape the line's last words only
+        plan.append(("text", val, gap))
+        gap = SOUND_GAP_MS          # parts() merges adjacent text, so a sound or pause follows
+    return plan
+
+
 def _shaped(line, said: str, expressive: bool) -> str:
     if not expressive:
         return said
@@ -93,9 +125,11 @@ async def say_pcm(text: str, emotion: str = "neutral", intensity: float = 1.0,
     expressive = _expressive(expressive)
     s = express(text, emotion, intensity)
     clips = []
-    for line, (sentence, kw, pause) in zip(s.lines, to_edge(s)):
-        sentence = _shaped(line, sentence, expressive)
-        clips.append(Clip(await _synth(sentence, edge_voice_for(sentence, voice), kw), pause))
+    for line in s.lines:
+        kw = line.prosody.edge()
+        for kind, val, gap in _line_plan(line, expressive, voice, live=False):
+            pcm = val if kind == "pcm" else await _synth(val, edge_voice_for(val, voice), kw)
+            clips.append(Clip(pcm, gap))
     return _finish(clips, expressive)
 
 
@@ -153,11 +187,12 @@ def _edge_lines(lines, voice: str = DEFAULT_VOICE, expressive: bool = False) -> 
     """Fallback voice for lines Orpheus cannot say (non-Latin script, rate limit)."""
     from .assemble import Clip
     from .emotion import Script
-    s = Script(list(lines))
     clips = []
-    for line, (sentence, kw, pause) in zip(s.lines, to_edge(s)):
-        sentence = _shaped(line, sentence, expressive)
-        clips.append(Clip(asyncio.run(_synth(sentence, edge_voice_for(sentence, voice), kw)), pause))
+    for line in Script(list(lines)).lines:
+        kw = line.prosody.edge()
+        for kind, val, gap in _line_plan(line, expressive, voice, live=False):
+            pcm = val if kind == "pcm" else asyncio.run(_synth(val, edge_voice_for(val, voice), kw))
+            clips.append(Clip(pcm, gap))
     return _finish(clips, expressive)
 
 
@@ -260,27 +295,55 @@ def aura_pcm(script, voice: str = "aura-2-andromeda-en", *, fallback_voice: str 
 
     clips = []
     for kind, lines in groups:
-        pause = lines[0].prosody.pause_before_ms
-        said = [_shaped(l, _spoken(l), expressive) for l in lines]
-        text = " ".join(said)
         gain = volume_db(lines[0].prosody.volume_pct) if expressive else 0.0
-        if kind == "hi":
-            clips.append(Clip(asyncio.run(_synth(text, hindi_voice, lines[0].prosody.edge())), pause))
-            continue
-        if kind == "en":
-            try:
-                clips.append(Clip(aura.synth(text, voice, live=live), pause, gain))
-                continue
-            except aura.AuraError as e:
-                print(f"  ! aura failed ({str(e)[:80]}); this sentence -> edge", file=sys.stderr)
-        # fallback keeps the per-sentence planner prosody, one edge call per line
-        for i, (l, s) in enumerate(zip(lines, said)):
-            clips.append(Clip(asyncio.run(_synth(s, edge_voice_for(s, fallback_voice), l.prosody.edge())),
-                              pause if i == 0 else l.prosody.pause_before_ms))
+        if len(lines) > 1:
+            # flow group (opt-in): one request, cues stripped (sounds would split it)
+            plans = [[("text", " ".join(_shaped(l, _spoken(l), expressive) for l in lines),
+                       lines[0].prosody.pause_before_ms)]]
+        else:
+            plans = [_line_plan(lines[0], expressive, voice, live)]
+        for line, plan in zip(lines, plans):
+            for part, val, gap in plan:
+                if part == "pcm":
+                    clips.append(Clip(val, gap, gain))
+                    continue
+                if kind == "hi":
+                    clips.append(Clip(asyncio.run(_synth(val, hindi_voice, line.prosody.edge())), gap))
+                    continue
+                if kind == "en" and aura.speakable(val):
+                    try:
+                        clips.append(Clip(aura.synth(val, voice, live=live), gap, gain))
+                        continue
+                    except aura.AuraError as e:
+                        print(f"  ! aura failed ({str(e)[:80]}); this part -> edge", file=sys.stderr)
+                clips.append(Clip(asyncio.run(_synth(val, edge_voice_for(val, fallback_voice),
+                                                     line.prosody.edge())), gap))
     return _finish(clips, expressive)
 
 
-ENGINE_VOICES = {"edge": DEFAULT_VOICE, "orpheus": "troy", "aura": "aura-2-andromeda-en"}
+def fish_pcm(script, voice: str | None = None, *, live: bool = False,
+             expressive: bool | None = None, model: str | None = None) -> bytes:
+    """Fish Audio S2.1: it ACTS the emotion from [cues] (fish.py). Lines are
+    packed into ~1200-char requests (tts.fish_chunks); a chunk Fish fails on is
+    spoken by Aura (English) / Swara (Hindi) instead, so no line is lost."""
+    from . import fish
+    from .assemble import Clip
+    from .emotion import Script
+    from .tts import fish_chunks
+    expressive = _expressive(expressive)
+    clips = []
+    for i, (text, lines) in enumerate(fish_chunks(script)):
+        gap = lines[0].prosody.pause_before_ms if i else 0
+        try:
+            clips.append(Clip(fish.synth(text, voice, model=model, live=live), gap))
+        except fish.FishError as e:
+            print(f"  ! fish failed ({str(e)[:80]}); this chunk -> aura", file=sys.stderr)
+            clips.append(Clip(aura_pcm(Script(lines), live=live, expressive=expressive), gap,
+                              trim=False))
+    return _finish(clips, expressive)
+
+
+ENGINE_VOICES = {"edge": DEFAULT_VOICE, "orpheus": "troy", "aura": "aura-2-andromeda-en", "fish": None}
 # Default = Deepgram Aura-2 Andromeda (Shaurya, 2026-10-15). Fallbacks: edge Neerja,
 # and hi-IN Swara for Devanagari. PARALANG_ENGINE=orpheus|edge overrides.
 DEFAULT_ENGINE = (os.environ.get("PARALANG_ENGINE") or "aura").strip().lower()
@@ -302,6 +365,8 @@ def say_wav(text: str, out: str | Path, emotion: str = "neutral", intensity: flo
         pcm = orpheus_pcm(express(text, emotion, intensity), voice, expressive=expressive)
     elif engine == "aura":
         pcm = aura_pcm(express(text, emotion, intensity), voice, expressive=expressive)
+    elif engine == "fish":
+        pcm = fish_pcm(express(text, emotion, intensity), voice, expressive=expressive)
     else:
         raise ValueError(f"unknown engine {engine!r}")
     out = Path(out)
@@ -320,7 +385,7 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--engine", choices=sorted(ENGINE_VOICES), default=DEFAULT_ENGINE,
                     help=f"default {DEFAULT_ENGINE} (env PARALANG_ENGINE)")
     ap.add_argument("-o", "--out", type=Path, default=Path("say.wav"))
-    ap.add_argument("--format", choices=["wav", "ssml", "azure", "elevenlabs", "openai", "gemini"],
+    ap.add_argument("--format", choices=["wav", "ssml", "azure", "elevenlabs", "openai", "gemini", "fish"],
                     default="wav", help="wav = synthesize with --engine; others print the payload")
     ap.add_argument("--demo", action="store_true", help="render every emotion to ./emotion_demo/")
     ap.add_argument("--expressive", action="store_true", default=None,
@@ -349,6 +414,9 @@ def main(argv: list[str] | None = None) -> None:
         print(json.dumps(to_elevenlabs(s), ensure_ascii=False, indent=2))
     elif a.format == "openai":
         print(json.dumps(to_openai(s), ensure_ascii=False, indent=2))
+    elif a.format == "fish":
+        from .tts import to_fish
+        print("\n".join(to_fish(s)))
     else:
         print(to_gemini(s))
 

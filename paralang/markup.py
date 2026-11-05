@@ -36,6 +36,8 @@ Marks:
 - [emotion] before a sentence where the delivery should change. Allowed: {emotions}. Use few; most sentences inherit the previous one.
 - | (a beat) inside a sentence, right before the payoff of a line, where a human narrator would hold for a moment. At most one per sentence, and only on lines that deserve weight. Never inside a phrase that belongs together ("collision course", "three football fields", a name, a number): only between phrases.
 - *word* around the one word that carries a line's punch. Rare: at most one per 3 sentences.
+- An emotion may carry an intensity word or a delivery tone, like a voice director would write: [slightly sad], [very excited], [angry][shouting], [calm][soft tone], [whispering]. Tones: whispering, soft tone, shouting, slowly, in a hurry tone.
+- A sound where a person would actually make one, placed where it happens: [laughing], [chuckling], [sighing], [gasping], [breath]. Only when the text implies it (a joke, relief, shock, a hard admission). At most one per 4 sentences; none is fine.
 
 Choose emotions that fit the story, not the punctuation: danger, stakes and reveals are serious or dramatic, never excited or cheerful. Keep the text on one line, exactly as given apart from the marks. Start the text with an [emotion]. Output only the marked text, no explanation.
 

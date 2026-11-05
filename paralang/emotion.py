@@ -49,9 +49,32 @@ EMOTIONS: dict[str, Emotion] = {
     "whisper":     Emotion(-8,  0, -20, 1.3, "whispering, intimate and quiet", "whispers", "whispering"),
     "dramatic":    Emotion(-12, -4, +6, 1.6, "dramatic and suspenseful, slow with weight", "dramatically", "narration-professional"),
     "urgent":      Emotion(+14, +4, +8, 0.6, "urgent and fast, something matters right now", "urgently", "shouting"),
+    # 2026-11-05: Fish Audio S2's emotion set, so its scripts work on every engine
+    "angry":       Emotion(+6,  -2, +10, 0.8, "angry, sharp and forceful", "angry", "angry"),
+    "frustrated":  Emotion(+4,  -2, +6, 0.85, "frustrated and exasperated", "frustrated", "angry"),
+    "nervous":     Emotion(+8,  +4, -6, 0.8, "nervous and unsure, a little shaky", "nervously", "fearful"),
+    "scared":      Emotion(+10, +6, -8, 0.8, "scared and breathless", "scared", "terrified"),
+    "surprised":   Emotion(+6, +10, +6, 0.9, "surprised, caught off guard", "surprised", "cheerful"),
+    "sarcastic":   Emotion(-6,  -2,  0, 1.1, "sarcastic, dry and knowing", "sarcastically", "unfriendly"),
+    "hopeful":     Emotion(-2,  +4,  0, 1.05, "hopeful and quietly optimistic", "hopeful", "hopeful"),
+    "determined":  Emotion(-2,  -3, +8, 0.95, "determined, firm and resolute", "determined", "serious"),
+    "disappointed": Emotion(-8, -4, -6, 1.3, "disappointed and let down", "disappointed", "sad"),
+    "proud":       Emotion(-2,  +2, +6, 1.05, "proud and glowing", "proudly", "cheerful"),
+    "relieved":    Emotion(-6,  +2, -2, 1.2, "relieved, letting the tension go", "relieved", "friendly"),
+    "grateful":    Emotion(-4,  +3,  0, 1.15, "grateful and sincere", "gratefully", "friendly"),
+    "amused":      Emotion(+2,  +4, +2, 1.0, "amused, holding back a laugh", "amused", "cheerful"),
+    "playful":     Emotion(+6,  +6, +4, 0.9, "playful and teasing", "playfully", "cheerful"),
+    "shy":         Emotion(-6,  +2, -12, 1.2, "shy and soft-spoken", "shyly", "embarrassed"),
+    "embarrassed": Emotion(-4,  +3, -10, 1.1, "embarrassed and a little awkward", "embarrassed", "embarrassed"),
+    "bored":       Emotion(-8,  -5, -6, 1.2, "bored and flat, unimpressed", "bored", ""),
+    "nostalgic":   Emotion(-10, -2, -4, 1.4, "nostalgic and wistful", "wistfully", "sad"),
+    "tender":      Emotion(-10,  0, -10, 1.35, "tender and gentle, close and loving", "tenderly", "gentle"),
+    "mysterious":  Emotion(-12, -4, -8, 1.5, "mysterious, low and slow, drawing you in", "mysteriously", "whispering"),
 }
 
-_TAG_RE = re.compile(r"\[([a-zA-Z_]+)(?::([0-9.]+))?\]")
+# Any bracketed cue: [warm], [excited:0.5], [slightly sad], [laughing nervously].
+# group(1) = the phrase, group(2) = an explicit :intensity.
+_TAG_RE = re.compile(r"\[([a-zA-Z][a-zA-Z _-]{0,40}?)(?::([0-9.]+))?\]")
 # "।" / "॥" (danda) end Hindi sentences; without them a Hindi sentence and the
 # English one after it became one line and the Hindi voice read both.
 _SENT_RE = re.compile(r"[^.!?…।॥]+(?:\.\.\.|[.!?…।॥])*", re.UNICODE)
@@ -74,7 +97,11 @@ class Line:
     prosody: Prosody
     # Same sentence WITH pacing marks: `|` = a beat inside the sentence, `*word*`
     # = emphasis. Sentence gaps alone cannot make one word land; these can.
+    # Sound / long-break / unknown [cues] stay in it for the engines to realize.
     marked: str = ""
+    # The cue words as written ("slightly sad", "angry][shouting"): acting
+    # engines (Orpheus, Fish, ElevenLabs) get these verbatim, not our label.
+    cue: str = ""
 
     def beats(self) -> list[tuple[str, bool]]:
         """[(chunk, emphasised)] in order, split at beats. Emphasis also opens a beat."""
@@ -107,19 +134,60 @@ def split_sentences(text: str) -> list[str]:
     return [s.strip() for s in _SENT_RE.findall(text) if s.strip()]
 
 
+_EMPHASIS_CUE_RE = re.compile(r"\[emphasis\]\s*([\w'-]+)", re.IGNORECASE)
+_BREAK_CUE_RE = re.compile(r"\[(?:break|pause|beat)\]", re.IGNORECASE)
+
+
+@dataclass
+class Segment:
+    emotion: str
+    intensity: float
+    sentence: str
+    cue: str = ""
+    tone: tuple = (0, 0, 0)
+
+
+def segments(text: str, default: str = "neutral", intensity: float = 1.0) -> list[Segment]:
+    """Text with any [cues] -> per-sentence Segments.
+
+    Emotion cues ([warm], [slightly sad], [nervous]) and tone cues
+    ([whispering], [soft tone]) switch the delivery for the text after them;
+    adjacent cues stack ("[angry][shouting]"). [break] becomes a `|` beat and
+    "[emphasis] word" becomes *word*. Sound, long-break and unknown cues stay
+    in the sentence for the engine to realize (see direction.py)."""
+    from .direction import resolve
+    text = _EMPHASIS_CUE_RE.sub(r"*\1*", text)
+    text = _BREAK_CUE_RE.sub(" | ", text)
+    out: list[Segment] = []
+    emo, inten, cue, tone, pos, last_end = default, intensity, "", (0, 0, 0), 0, -1
+    for m in _TAG_RE.finditer(text):
+        d = resolve(m.group(0)[1:-1])
+        if d.kind not in ("emotion", "tone"):
+            continue
+        out += [Segment(emo, inten, x, cue, tone) for x in split_sentences(text[pos:m.start()])]
+        stacked = last_end >= 0 and not text[last_end:m.start()].strip()
+        phrase = d.phrase.split(":")[0].strip()          # "[excited:0.5]" -> "excited"
+        if stacked and cue:
+            cue, tone = f"{cue}][{phrase}", tuple(a + b for a, b in zip(tone, d.tone))
+        elif stacked and d.kind == "tone" and emo != default:
+            cue, tone = f"{emo}][{phrase}", d.tone       # "[sad][whispering]": keep both words
+        else:
+            # a bare paralang emotion name needs no verbatim cue: engines render
+            # their own wording (with intensity) from Line.emotion
+            cue = "" if phrase.lower() in EMOTIONS else phrase
+            tone = d.tone
+        if d.kind == "emotion":
+            emo, inten = d.emotion, d.intensity if d.intensity is not None else intensity
+        pos = last_end = m.end()
+    out += [Segment(emo, inten, x, cue, tone) for x in split_sentences(text[pos:])]
+    return out
+
+
 def parse(text: str, default: str = "neutral", intensity: float = 1.0) -> list[tuple[str, float, str]]:
     """'[warm] a. [excited:0.5] b.' -> [(warm,1.0,'a.'), (excited,0.5,'b.')].
-    Unknown tags are left in the text (they may be meant for the TTS itself)."""
-    out, emo, inten, pos = [], default, intensity, 0
-    for m in _TAG_RE.finditer(text):
-        name = m.group(1).lower()
-        if name not in EMOTIONS:
-            continue
-        chunk = text[pos:m.start()]
-        out += [(emo, inten, s) for s in split_sentences(chunk)]
-        emo, inten, pos = name, float(m.group(2)) if m.group(2) else intensity, m.end()
-    out += [(emo, inten, s) for s in split_sentences(text[pos:])]
-    return out
+    Free-form cues resolve too ([slightly sad] -> sad, 0.5). Unknown tags are
+    left in the text (they may be meant for the TTS itself)."""
+    return [(g.emotion, g.intensity, g.sentence) for g in segments(text, default, intensity)]
 
 
 def express(text: str, emotion: str = "neutral", intensity: float = 1.0, *,
@@ -132,12 +200,22 @@ def express(text: str, emotion: str = "neutral", intensity: float = 1.0, *,
         raise ValueError(f"unknown emotion {emotion!r}; choose from {', '.join(EMOTIONS)}")
     planner = DeliveryPlanner(base_rate_pct=base_rate_pct, wobble=wobble)
     script = Script()
-    for emo, inten, sentence in parse(text, emotion, intensity):
-        plain = clean(sentence)
+    from .delivery import _clamp
+    for g in segments(text, emotion, intensity):
+        plain = clean(g.sentence)
         if not plain:
             continue
-        p = planner.plan(plain, cues, reply_id="script", emotion=emo, intensity=inten)
-        script.lines.append(Line(plain, emo, inten, p, marked=sentence))
+        if not _TAG_RE.sub("", plain).strip(" .,!?…|"):
+            # only cues, no words (a trailing "[laughing]"): ride on the previous line
+            if script.lines:
+                prev = script.lines[-1]
+                prev.text, prev.marked = f"{prev.text} {plain}", f"{prev.marked} {g.sentence.strip()}"
+            continue
+        p = planner.plan(plain, cues, reply_id="script", emotion=g.emotion, intensity=g.intensity)
+        if any(g.tone):
+            p = type(p)(_clamp(p.rate_pct + g.tone[0], "rate"), _clamp(p.pitch_hz + g.tone[1], "pitch"),
+                        _clamp(p.volume_pct + g.tone[2], "volume"), p.pause_before_ms)
+        script.lines.append(Line(plain, g.emotion, g.intensity, p, marked=g.sentence, cue=g.cue))
     if not script.lines:
         raise ValueError("nothing speakable in text (empty, or only [emotion] tags)")
     return script
