@@ -78,8 +78,12 @@ def _rejected(sound: str, performer: str, i: int) -> Path:
 def heard_words_ok(heard: str) -> bool:
     words = re.findall(r"[a-z]+(?:-[a-z]+)?", heard.lower())
     # drawn-out sounds Whisper spells freely: "heheheheh", "awwww", "hmmmm", "aaahh"
-    stretched = re.compile(r"^(?:h?[aeiou]*h*)+$|^[ahmw]+$|^(?:he|ha|hi)+h?$")
-    return all(w in ONOMATOPOEIA or stretched.match(w) for w in words)
+    return all(w in ONOMATOPOEIA or _STRETCHED.match(w) for w in words)
+
+
+# Only interjection shapes, no nested quantifiers: "hehehe(h)", "hahaha",
+# "awww", "hmmmm", "aaahh", "ooohh". Short real words ("i", "hi", "am") never match.
+_STRETCHED = re.compile(r"^(?:he){2,}h?$|^(?:ha){2,}h?$|^a+w{2,}$|^h?m{3,}$|^a{2,}h*$|^o{2,}h*$")
 
 
 def _shape(pcm: bytes, max_s: float) -> bytes:
